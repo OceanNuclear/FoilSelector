@@ -2,7 +2,7 @@ from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import arr
 from matplotlib import pyplot as plt
 from convert2R import *
 
-AREA = pi*7**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
+AREA = pi*3.5**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
 #The only disadvantage to having a foil with too much area is that it must be very thin,
 #perhaps impossible-to-manufature-ly thin, not overexpose the detector.
 THRESHOLD_ENERGY = 1 # keV

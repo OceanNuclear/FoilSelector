@@ -5,10 +5,10 @@ import json
 from openmc.data import NATURAL_ABUNDANCE
 import uncertainties
 from ReadData import main_read
-from collapx import flux_conversion, main_collapse, MeV, read_apriori_and_gs_df
+from collapx import flux_conversion, main_collapse, MeV, read_apriori_and_gs_df, interpolate_flux, get_scheme
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
-HPGE_ERROR = False
+SIMULATE_GAMMA_DETECTOR = False
 IRRADIATION_DURATION = 180 #seconds
 CM2_BARNS_CONVERSION = 1E-24 # convert flux to barns
 COUNT_TIME = 180 # seconds
@@ -95,8 +95,9 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
             N_target = number_of_atoms_of_element()
         if N_target !=0: #filtering out the non-naturally occuring elements
             all_peaks = []
-            for dec_files in rnr_file.decay:# use whichever version that has a more comprehensive (longer) list of gamma radiation
-                try:
+            spectra_json[rname] = {} # initialize empty dictionary, since we now know there are non-zero number of this naturally occurring element.
+            for dec_files in rnr_file.decay: # for each product (if metastable products form, then it's possible to have two or more products from the same reaction)
+                try:# use whichever version that has a more comprehensive (longer) list of gamma radiation
                     len_rad = [len(d.spectra['gamma']['discrete']) for d in dec_files]
                     d = np.argmax(len_rad)
                     dec = dec_files[d]
@@ -114,7 +115,7 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
                         for peak in specific_spec['discrete']:
                             all_peaks_of_this_prod.append(peak)
                 all_peaks.append(all_peaks_of_this_prod)
-                spectra_json[rname] = dec.spectra
+                spectra_json[rname][dec.nuclide['name']] = dec.spectra.copy()
             #deterministic part:
             # calculate the expected number of nuclides left at the beginning of the measurement
             N_infty = rnr_file.sigma @ apriori_and_unc['value'].values * IRRADIATION_DURATION * N_target *CM2_BARNS_CONVERSION# unit: number of atoms # assuming flash irradiation
@@ -125,13 +126,13 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
                 decay_constant.append( product[0].decay_constant ) #choose the first version of that product that comes up.
                 N_0.append( N_infty * decay_correct_factors_with_unc[-1].n )# unit: number of atoms
                 
-            if HPGE_ERROR: #(Only go into this for loop if we're propagating errors starting from the gamma radiations.')
+            if SIMULATE_GAMMA_DETECTOR: #(Only go into this for loop if we're propagating errors starting from the gamma radiations.')
                 #create the following lists once for different product within the same reaction.
-                for j in range(len(all_peaks)):
+                for j in range(len(all_peaks)): # for each decay product
                     Omega, intrinsic_efficiency, intensities, decay_constant, count_rates, counts = [], [], [], [], [], [] # len=len(all_peaks_of_this_prod)=i
                     counts_with_unc, count_rates_with_unc, Nk_with_unc = [], [], [] # len=len(all_peaks_of_this_prod)=i
                     N0_with_unc_of_each_prod = [] #len=len(all_peaks)=j
-                    for i in range(len(all_peaks[j])):
+                    for i in range(len(all_peaks[j])): #for each peak
                         peak = all_peaks[j][i]
                         # Sum over the count rate from each peak.
                         Omega.append(               geometric_efficiency() )            # dimensionless
@@ -147,7 +148,12 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
                         #theoretically the integrate_count factor should covaries with the half_life used below; but we're simplifying things here and assuming that they are two independent variables right now.
                         Nk_with_unc.append(         count_rates[i]/(intensities[i] * intrinsic_efficiency[i] * Omega) )
                     N0_with_unc_of_each_prod.append( compute_weighted_count_rate(Nk_with_unc) )
-
+                    
+                    # Monkey patch in measurement information dictionary
+                    product_j = rnr_file.decay[j][0].nuclide['name']
+                    spectra_json[rname][product_j]['measurement'] = {"N_0":N_0[j], # For every mole of parent elements/isotope, you'll have this many left at measurement time
+                                            "decay_constant":decay_constant[j] # which will emit radiation at this rate per daughter nuclide.
+                                            }
             else: #assume 100% detection efficiency
                 error_on_N_0 = sqrt(N_0)*(1/sqrt(COUNT_TIME))
                 N0_with_unc_of_each_prod = ary([uncertainties.core.Variable(N_0[i], error_on_N_0[i]) for i in range(len(N_0))])
@@ -162,7 +168,7 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
                 
                 _counted_rr.append([N_infty_with_unc.n, N_infty_with_unc.s])
                 print(rname, "->", "|".join([prod.nuclide['name'] for prod in all_products])," is added")
-                _R_matrix.append( CM2_BARNS_CONVERSION * ary(rnr_file.sigma) )
+                _R_matrix.append( CM2_BARNS_CONVERSION * ary(rnr_file.sigma) * N_target)
                 r_name_list.append(rname)
             else:
                 print(f"Not every product of {rname} has a detectible radiation. Therefore it is excluded.")
@@ -182,7 +188,7 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
     # rr=rr.loc[new_rname_order]
 
     with open(spectra_file, mode='w', encoding='utf-8') as f:
-        json.dump(turn_Var_into_str(spectra_json), f)
+        json.dump(turn_Var_into_str(spectra_json.copy()), f)
     print(f"The spectra for each reaction is saved at {spectra_file}")
     
     R.to_csv(R_file)
@@ -199,21 +205,22 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
 
     return R, rr, spectra_json
 
+
 if __name__=='__main__':
 
     rdict, dec_r, all_mts = main_read()
     apriori_and_unc, gs_array = read_apriori_and_gs_df('output/gs.csv', 'output/apriori.csv', 'integrated', apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
-    reaction_and_radiation = main_collapse(apriori_and_unc, gs_array, rdict, dec_r)
+    apriori_func = interpolate_flux(apriori_and_unc['value'].values, gs_array) # Can use a different flux profile if you would like to.
+    reaction_and_radiation = main_collapse(apriori_func, gs_array, rdict, dec_r)    
     R, rr, spectra_json = R_conversion_main(reaction_and_radiation, apriori_and_unc, "output/Scaled_R_matrx.csv", "output/rr.csv", "output/spectra.json")
 
     # Tasks
     '''
     3. Then implement gamma overlap checks, and allow it to be imported into the next file.
-    4. Check that they're all of the right shape
     '''
     # Tests:
     '''
-    1. The HPGE_ERROR=True should perform slightly worse (with larger uncertainties, but same means) than HPGE_ERROR=False
+    1. The SIMULATE_GAMMA_DETECTOR=True should perform slightly worse (with larger uncertainties, but same means) than SIMULATE_GAMMA_DETECTOR=False
     2. Increasing COUNT_TIME should asymptotically improve the uncertainties to a limit.
     3. Fast decaying should be affected more by increasing IRRADIATION_DURATION than slow decaying.
     4. Use the integration function of the Tabulated1D properly.
