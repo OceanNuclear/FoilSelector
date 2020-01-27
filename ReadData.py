@@ -30,7 +30,8 @@ def welcome_message():
             file_list += [os.path.join(folder, file) for file in os.listdir(folder) if file.endswith('.endf')]
     except (IndexError, AssertionError):
         print("usage:")
-        print("'python "+sys.argv[0]+" folders/ containing/ endf/ files/ in/ descending/ order/ of/ priority/'")
+        print("'python "+sys.argv[0]+" folders/ containing/ endf/ files/ in/ descending/ order/ of/ priority/ [output/]'")
+        print("where the outputs-saving directory 'output/' is only requried when read_apriori_and_gs_df is used.")
         print("Use wildcard (*) if necessary")
         print("The endf files in question can be downloaded")
         # by running the make file.")

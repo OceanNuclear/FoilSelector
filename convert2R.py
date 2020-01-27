@@ -1,4 +1,5 @@
-from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
+from numpy import exp, cos, arccos, sin, arctan, tan, pi, sqrt; import numpy as np; tau = 2*pi
+from numpy import array as ary
 from matplotlib import pyplot as plt
 import pandas as pd
 import json
@@ -6,6 +7,7 @@ from openmc.data import NATURAL_ABUNDANCE
 import uncertainties
 from ReadData import main_read
 from collapx import flux_conversion, main_collapse, MeV, read_apriori_and_gs_df, interpolate_flux, get_scheme
+import os, sys
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
 SIMULATE_GAMMA_DETECTOR = False
@@ -79,7 +81,9 @@ def turn_Var_into_str(data): #operable on dictionaries.
         pass
     return data
 
-def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, spectra_file):
+def R_conversion_main(reaction_and_radiation, apriori_and_unc, out_dir= sys.argv[-1]):
+    assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
+    R_file, rr_file, spectra_file = os.path.join(out_dir, "Scaled_R_matrx.csv"), os.path.join(out_dir, "rr.csv"), os.path.join(out_dir, "spectra.json")
     spectra_json = {}
     _counted_rr, _R_matrix, r_name_list= [], [], [] # the first tow lists are un-sorted, therefore I prefer to leave them as private variables.
 
@@ -207,12 +211,11 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, R_file, rr_file, 
 
 
 if __name__=='__main__':
-
-    rdict, dec_r, all_mts = main_read()
-    apriori_and_unc, gs_array = read_apriori_and_gs_df('output/gs.csv', 'output/apriori.csv', 'integrated', apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
+    apriori_and_unc, gs_array = read_apriori_and_gs_df(apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
     apriori_func = interpolate_flux(apriori_and_unc['value'].values, gs_array) # Can use a different flux profile if you would like to.
+    rdict, dec_r, all_mts = main_read()
     reaction_and_radiation = main_collapse(apriori_func, gs_array, rdict, dec_r)    
-    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, apriori_and_unc, "output/Scaled_R_matrx.csv", "output/rr.csv", "output/spectra.json")
+    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, apriori_and_unc)
 
     # Tasks
     '''

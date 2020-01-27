@@ -1,4 +1,4 @@
-from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
+from numpy import exp, cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
 from numpy import log as ln
 import scipy
 from scipy.stats.mstats import gmean
@@ -7,6 +7,9 @@ import openmc
 import warnings
 import pandas as pd
 from ReadData import main_read
+from collections.abc import Iterable
+from math import fsum
+import os, sys
 
 ALLOW_UNSTABLE_PARENT = True #allowing the unstable nuclide e.g. C14.
 #Set this to true most of the time. There is another option at the top of convert2R to filter out non-naturally occurring elements.
@@ -34,6 +37,95 @@ def get_scheme(scheme):
     return val_to_key_lookup(INTERPOLATION_SCHEME, scheme)
 loglog = get_scheme('log-log')
 histogramic = get_scheme('histogram')
+
+def area_between_2_pts(xy1,xy2, xi,scheme):
+    x1, y1, x2, y2, xi = np.hstack([xy1, xy2, xi]).flatten()
+    assert x1<=xi<=x2, "xi must be between x1 and x2"
+    x_ = xi-x1
+    if x1==x2:
+        return 0.0  #catch all cases with zero-size width bins
+    if y1==y2 or scheme==1:# histogramic/ flat interpolation
+        return y1*x_ #will cause problems in all log(y) interpolation schemes if not caught
+    
+    dy, dx = y2-y1, x2-x1
+    logy, logx = [bool(int(i)) for i in bin(scheme-2)[2:].zfill(2)]
+    if logx:
+        assert(all(ary([x1,x2,xi])>0)), "Must use non-zero x values for these interpolation schemes"
+        lnx1, lnx2, lnxi = ln(x1), ln(x2), ln(xi)
+        dlnx = lnx2 - lnx1
+    if logy:
+        assert(all(ary([y1,y2])>0)), "Must use non-zero y values for these interpolation schemes"
+        lny1, lny2 = ln(y1), ln(y2)
+        dlny = lny2 - lny1
+
+    if scheme==2: # linx, liny
+        m = dy/dx
+        if xi==x2:
+            return dy*dx/2 + y1*dx
+        else:
+            return y1*x_ + m*x_**2 /2
+    if scheme==3: # logx, liny
+        m = dy/dlnx
+        if xi==x2:
+            return y1*dx + m*(x2*dlnx-dx)
+        else:
+            return y1*x_ + m*(xi*(lnxi-lnx1)- x_)
+            return (y1 - m*lnx1)*x_ + m*(-x_+xi*lnxi-x1*lnx1)
+    if scheme==4: # linx, logy
+        m = dlny/dx
+        if xi==x2:
+            return 1/m *dy
+        else:
+            return 1/m *y1*(exp(x_*m)-1)
+    if scheme==5:
+        m = dlny/dlnx
+        if m==-1:
+            return y1 * x1 * (lnxi-lnx1)
+        if xi==x2:
+            return y1/(m+1) * ( x2 * (x2/x1)**m - x1 )
+        else:
+            return y1/(m+1) * ( xi * (1 + x_/x1)**m - x1 )
+    else:
+        raise AssertionError("a wrong interpolation scheme {0} is provided".format(scheme))
+
+class Integrate():
+    def __init__(self, sigma):
+        self.x = sigma.x
+        self.y = sigma.y
+        self.xy = ary([self.x, self.y])
+        assert all(np.diff(self.x)>=0), "the x axis must be inputted in ascending order"
+        self.interpolations = []
+        self.next_area = []
+        for i in range(len(self.x)-1):
+            break_region = np.searchsorted(sigma.breakpoints, i+1, 'right')
+            self.interpolations.append(sigma.interpolation[break_region])
+            # region_num = np.searchsorted(i, self.breakpoints, 'right')
+            # scheme = self.interpolation[region_num]
+            x1, x2 = sigma.x[i:i+2]
+            xy1 = ary([x1, sigma.y[i]])
+            xy2 = ary([x2, sigma.y[i+1]])
+            self.next_area.append(area_between_2_pts(xy1, xy2, x2, scheme=self.interpolations[i] ))
+    def __call__(self, a, b):
+        assert np.shape(a)==np.shape(b), "There must be as many starting points as the ending points to the integrations."
+        if isinstance(a, Iterable):
+            return ary([self(ai, bi) for (ai,bi) in zip(a,b)]) #catch all iterables cases.
+            # BTW, don't ever input a scalar into __call__ for an openmc.data.Tabulated1D function.
+            # It's going to return a different result than if you inputted an Iterable.
+            # Integrate(), on the other hand, doesn't have this bug.
+        
+        a, b = np.clip([a,b], min(self.x), max(self.x)) # assume if no data is recorded at the low energy limit.
+        ida, idb = self.get_region(a), self.get_region(b)
+        total_area = self.next_area[ida:idb]
+        total_area.append(-area_between_2_pts(self.xy[:,ida], self.xy[:,ida+1], a, self.interpolations[ida]))
+        total_area.append(area_between_2_pts(self.xy[:,idb], self.xy[:,idb+1], b, self.interpolations[idb]))
+        return fsum(total_area)
+
+    def get_region(self, x):
+        idx = np.searchsorted(self.x, x, 'right')-1
+        assert all([x<=max(self.x)]),"Out of bounds of recorded x! (too high)"
+        # assert all([0<=idx]), "Out of bounds of recorded x! (too low)" #doesn't matter, simply assume zero. See __call__
+        idx -= x==max(self.x) * 1 # if it equals eactly the upper limit, we need to minus one in order to stop it from overflowing.
+        return np.clip(idx, 0, None)
 
 class ReactionAndRadiation():
     def __init__(self, sigma, decay_products_and_radiation, parent_nuclide):
@@ -89,12 +181,6 @@ def scipy_integrate(func, a, b, error_msg, rtol=1E-3):
             print(str(w[0].message), "for ", error_msg)
     return integral, error
 
-def better_integral(sigma):
-    with warnings.catch_warnings() as w: # ignore the warning
-        inte = sigma.integral()
-    new_sigma = openmc.data.Tabulated1D(sigma.x, sigma.integral(), breakpoints=sigma.breakpoints, interpolation=sigma.interpolation)
-    return new_sigma
-
 def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori should be given in per MeV
     '''
     if implicit and type(apriori_per_eV)==type(None):
@@ -114,16 +200,13 @@ def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori sho
     sigma_g = []
     if type(apriori_per_eV_func)==type(None):
         apriori_per_eV_func = interpolate_flux( np.ones(len(gs_ary)), gs_ary )
-    if False:
-    # if all(apriori_per_eV_func.x==np.hstack([gs_ary[:,0],gs_ary[0,0]])) and all(apriori_per_eV_func.interpolation==ary([1])): #if the a priori has the same group structure
-        # apriori_integrated = flux_conversion(apriori_per_eV_func.y, gs_ary, 'per eV', 'integrated')
-        #then the apriori factors outside of the integral sign and cancels out. Therefore no calculation of that is needed.
-        inte = better_integral()
+    if True:
+        I = Integrate(sigma)
         for i in range(len(gs_ary)):
-            numinator = np.diff( inte(gs_ary[i]) )
+            numinator = I(*gs_ary[i])
             denominator = np.diff(gs_ary[i])
             sigma_g.append(numinator/denominator)
-        return
+        return ary(sigma_g).flatten().tolist()
     else:
         for i in range(len(gs_ary)):
             integrand = lambda x : apriori_per_eV_func(x) * sigma(x)
@@ -133,9 +216,14 @@ def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori sho
             # Change ^ this line if you want implement covariance in the future.
         return sigma_g #unit: barns
 
-def read_apriori_and_gs_df(gs_file, apriori_file, apriori_in_fmt='integrated', apriori_gs_file=None, apriori_multiplier=1, gs_multipliers=1):
+def read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_in_fmt='integrated', apriori_gs_file=None, apriori_multiplier=1, gs_multipliers=1):
     try:
+        assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
+        gs_file = os.path.join(out_dir, "gs.csv")
+        apriori_file = os.path.join(out_dir, "apriori.csv")
+        print("scaling up/down the group structure's numerical value by {0} to obtain the group structure in eV".format(gs_multipliers))
         gs_array = pd.read_csv( gs_file, sep=',').values *gs_multipliers
+        print("Reading in the a priori file from {0} in the format of {1} flux, by scaling its numerical values up/down by a factor of{2}".format(apriori_file, apriori_in_fmt, apriori_multiplier))
         apriori_df = pd.read_csv( apriori_file, sep=',|±', engine='python')*apriori_multiplier # tell the apriori and the uncertainty.
         if type(apriori_gs_file)==type(None):
             apriori_gs = gs_array
@@ -163,6 +251,7 @@ def main_collapse(apriori_func, gs_array, rdict, dec_r):
                 #
                 if all([i in dec_r.keys() for i in r.products_name]): #only plot it if we know all of the decay products.
                     if ALLOW_UNSTABLE_PARENT or r.parent['stable']:
+                        print("collapsing", rname)
                         sigma_g = collap_xs(r.sigma, gs_array, rname, apriori_per_eV_func=apriori_func) #apriori_and_unc.values[:,0])
                         if type(sigma_g)==type(None):
                             void_reactions.append(rname)
@@ -198,7 +287,7 @@ def slideshow(rdict, word=''):
                 plt.clf()
 
 if __name__=='__main__':
-    rdict, dec_r, all_mts = main_read()
-    apriori_and_unc, gs_array = read_apriori_and_gs_df('output/gs.csv', 'output/apriori.csv', 'integrated', apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
+    apriori_and_unc, gs_array = read_apriori_and_gs_df(apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
     apriori_func = interpolate_flux(apriori_and_unc['value'].values, gs_array) # Can use a different flux profile if you would like to.
+    rdict, dec_r, all_mts = main_read()
     reaction_and_radiation = main_collapse(apriori_func, gs_array, rdict, dec_r)
