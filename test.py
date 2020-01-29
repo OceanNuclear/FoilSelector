@@ -1,7 +1,7 @@
 from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
 from matplotlib import pyplot as plt
 import unittest
-from collapx import area_between_2_pts, Integrate
+from collapx import area_between_2_pts, Integrate, flux_conversion, MeV
 import numpy.random as rn
 from scipy.integrate import quadrature # get gaussian quadrature
 import openmc 
@@ -46,7 +46,11 @@ class AreaTest(unittest.TestCase):
     def test_scheme_5(self):
         assert self.fullrange(5)
         assert self.inbetween(5)
-    
+    # def test_ln(self):
+    #     from numpy import log as ln
+    #     #make sure ln(y2/y1)/ln(x2/x1) = -1
+    #     f = openmc.data.Tabulated1D()        
+
     def inbetween(self, scheme=1):
         PLOT = False
         # rn.seed(0)
@@ -97,3 +101,22 @@ class IntegratorTest(unittest.TestCase):
     def test_check_integral(self):
         I = self.test_create_integral()
         self.assertEqual(func_area(), I.next_area)
+
+class FluxConversionTest(unittest.TestCase):
+    def test_in(self):
+        self.gen_a_flux()
+        self.gen_gs()
+        #let's say the current flux was given per MeV
+        new_flux = flux_conversion(self.flux, self.gs, 'per MeV', 'per eV')
+        # integrate_new_flux = new_flux*self.gs_interval
+        # integrate_old_flux = self.flux*self.gs_interval/1E6 
+        # np.testing.assert_array_almost_equal_nulp(integrate_new_flux, integrate_old_flux)
+
+    def test_out(self):
+        pass
+        
+    def gen_a_flux(self):
+        self.flux= rn.uniform(size=10)
+    def gen_gs(self):
+        self.gs = np.cumsum(rn.uniform(size=11))
+        self.gs_interval = np.diff(self.gs)

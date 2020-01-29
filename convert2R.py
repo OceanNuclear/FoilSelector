@@ -1,5 +1,6 @@
 from numpy import exp, cos, arccos, sin, arctan, tan, pi, sqrt; import numpy as np; tau = 2*pi
 from numpy import array as ary
+from numpy import log as ln
 from matplotlib import pyplot as plt
 import pandas as pd
 import json
@@ -10,12 +11,14 @@ from collapx import flux_conversion, main_collapse, MeV, read_apriori_and_gs_df,
 import os, sys
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
-SIMULATE_GAMMA_DETECTOR = False
+SIMULATE_GAMMA_DETECTOR = True
 IRRADIATION_DURATION = 180 #seconds
 CM2_BARNS_CONVERSION = 1E-24 # convert flux to barns
 COUNT_TIME = 180 # seconds
 USE_NATURAL_ABUNDANCE = True
 VERBOSE = False
+THRESHOLD_ENERGY = [1E5, None] # eV # taking the highest L1 absorption edge as the lower limit
+MIN_COUNT_RATE_PER_MOLE_PARENT = 1E-1
 
 # apriori_per_eV has unit cm^-2 s^-1 eV^-1
 def simple_decay_correct(half_life, transit_time): #accounts for the decay between the end of the irradiation period up to the recording period.
@@ -39,28 +42,98 @@ def total_decay_correct(product_list, transit_time=60):
 def geometric_efficiency():
     return 0.5
 
-def efficiency_curve(energy_in_eV):
-    assert type(energy_in_eV)==uncertainties.core.Variable
-    intrinsic_efficiency = 1
-    return intrinsic_efficiency
+def HPGe_efficiency_curve_generator(deg=4, cov=True, file_root=sys.argv[-1]):
+    '''
+    according to Knoll (equation 12.32), polynomial fit in log-log space is the best.
+    This program is trying to do the same.
+    This polynomial in log-log space fit is confirmed by
+    @article{kis1998comparison,
+    title={Comparison of efficiency functions for Ge gamma-ray detectors in a wide energy range},
+    author={Kis, Zs and Fazekas, B and {\"O}st{\"o}r, J and R{\'e}vay, Zs and Belgya, T and Moln{\'a}r, GL and Koltay, L},
+    journal={Nuclear Instruments and Methods in Physics Research Section A: Accelerators, Spectrometers, Detectors and Associated Equipment},
+    volume={418},
+    number={2-3},
+    pages={374--386},
+    year={1998},
+    publisher={Elsevier}
+    }
+    '''
+    file_location = os.path.join(file_root, 'photopeak_efficiency.csv')
+    datapoints = pd.read_csv(file_location)
+    assert "energ" in datapoints.columns[0].lower(), "The file must contain a header. Energy (eV/MeV) has to be placed in the first column"
+    E, eff = datapoints.values.T[:2]
+    if 'MeV' in datapoints.columns[0]:
+        E = MeV*E
+    if datapoints.values.T[2:].shape[0]>0: # assume that column is the error
+        sigma = datapoints.values.T[2]
+        print("Using the 3rd column of ", file_location, r" as error on the efficiency measurements (\sigma)")
+        cov = 'unscaled'
+        w = 1/sigma**2
+    else:
+        w = None
+    from scipy import polyfit
+    p = polyfit(ln(E), ln(eff), deg, w=w, cov=cov) #make sure that the curve points downwards at high energy 
+    if cov:
+        p, pcov = p
+    #iteratively try increasing degree of polynomial fits.
+    #Currently the termination condition is via making sure that the curve points downwards at higher energy (leading coefficient is negative).
+    #However, I intend to change the termination condition to Bayesian Information Criterion instead.
+    if not p[0]<0:
+        mindeg, maxdeg = 2,6
+        for i in range(mindeg, maxdeg+1):
+            p = polyfit(ln(E), ln(eff), deg, w=w, cov=cov)            
+            if cov:
+                p, pcov = p
+            if p[0]<0:
+                print("a {0} order polynomial fit to the log(energy)-log(efficiency) curve is used instead of the default {1} order".format(i, deg))
+                break
+            elif i==maxdeg:#if we've reached the max degree tested and still haven't broken the loop, it means none of them fits.
+                print("None of the polynomial fit in log-log space is found to extrapolate properly! using the default {0} order fit...".format(deg) )
+                p = polyfit(ln(E), ln(eff), deg)
+    print("The covariance matrix is", pcov)
+
+    def efficiency_curve(E):
+        if type(E) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
+            lnE = ln(E.n)
+        else:
+            lnE = ln(E)
+        lneff = np.sum( [p[::-1][i]* lnE**i for i in range(len(p))], axis=0) #coefficient_i * x ** i
+        
+        if cov:
+            lnE_powvector = [lnE**i for i in range(len(p))][::-1]
+            variance_on_lneff = (lnE_powvector@pcov@lnE_powvector) # variance on lneff
+            if type(E) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
+                error_of_lnE = E.s/E.n
+                variance_from_E = sum([p[::-1][i]*i*lnE**(i-1) for i in range(1, len(p))])**2 * (error_of_lnE)**2
+                variance_on_lneff += variance_from_E
+            lneff_variance = exp(lneff)**2 * variance_on_lneff
+            return uncertainties.core.Variable( exp(lneff), sqrt(lneff_variance) )
+        else:
+            return exp(lneff)
+    return efficiency_curve
 
 def width(energy_in_eV):
-    assert type(energy_in_eV)==uncertainties.core.Variable
+    # assert type(energy_in_eV) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]
     FWHM_in_eV = 1
     return FWHM_in_eV
 
 def integrate_count(decay_constant, count_time=COUNT_TIME):
-    return count_time/( 1-exp(-decay_constant*count_time) )
+    exponent = -decay_constant*count_time
+    if type(exponent) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
+        exponentiated_term = uncertainties.core.Variable(exp(exponent.n), exp(exponent.n)*exponent.s)
+        return 1 - exponentiated_term
+    else:
+        return 1-exp(exponent)
 
 def add_unc(c):
     return uncertainties.core.Variable(c, sqrt(c))
 
-def compute_weighted_count_rate(count_rates_with_unc):
-    for count_rate in count_rates_with_unc:
-        assert type(count_rate)==uncertainties.core.Variable
-    if len(count_rates_with_unc)>0:
-        new_variance = 1/ sum([ (1/count.s**2) for count in count_rates_with_unc])
-        unnormalized_mean = sum([ (count.n/(count.s**2)) for count in count_rates_with_unc ])
+def compute_weighted_average(quantities):
+    for c in quantities:
+        assert type(c) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc], "Only accept uncertainties.core.Variable/AffineScalarFunc"
+    if len(quantities)>0:
+        new_variance = 1/ sum([ (1/c.s**2) for c in quantities])
+        unnormalized_mean = sum([ (c.n/(c.s**2)) for c in quantities ])
         best_fit_N = uncertainties.core.Variable(unnormalized_mean* new_variance, sqrt(new_variance))
         return best_fit_N
     else:
@@ -70,7 +143,7 @@ def number_of_atoms_of_element():
     return 6.02214076E23 # currently set to one mole
 
 def turn_Var_into_str(data): #operable on dictionaries.
-    if type(data)==uncertainties.core.Variable or type(data)==uncertainties.core.AffineScalarFunc:
+    if type(data) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
         data = str(data.n) + str("+/-")+str(data.s)
     elif type(data)==dict:
         for k,v in data.items():
@@ -81,11 +154,14 @@ def turn_Var_into_str(data): #operable on dictionaries.
         pass
     return data
 
-def R_conversion_main(reaction_and_radiation, apriori_and_unc, out_dir= sys.argv[-1]):
+def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.argv[-1]): # for folding to obtain reaction rates and uncertainties.
     assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
     R_file, rr_file, spectra_file = os.path.join(out_dir, "Scaled_R_matrx.csv"), os.path.join(out_dir, "rr.csv"), os.path.join(out_dir, "spectra.json")
     spectra_json = {}
     _counted_rr, _R_matrix, r_name_list= [], [], [] # the first tow lists are un-sorted, therefore I prefer to leave them as private variables.
+
+    if SIMULATE_GAMMA_DETECTOR:
+        photopeak_efficiency = HPGe_efficiency_curve_generator()
 
     for rname, rnr_file in reaction_and_radiation.items():
         if USE_NATURAL_ABUNDANCE:
@@ -122,7 +198,7 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, out_dir= sys.argv
                 spectra_json[rname][dec.nuclide['name']] = dec.spectra.copy()
             #deterministic part:
             # calculate the expected number of nuclides left at the beginning of the measurement
-            N_infty = rnr_file.sigma @ apriori_and_unc['value'].values * IRRADIATION_DURATION * N_target *CM2_BARNS_CONVERSION# unit: number of atoms # assuming flash irradiation
+            N_infty = rnr_file.sigma @ apriori_integrated * IRRADIATION_DURATION * N_target *CM2_BARNS_CONVERSION# unit: number of atoms # assuming flash irradiation
             #   start to split-up the prediction by products, i.e. if there are multiple products, then we'll have to sum them.
             N_0, decay_correct_factors_with_unc, decay_constant = [], [], []
             for product in rnr_file.decay:
@@ -132,26 +208,31 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, out_dir= sys.argv
                 
             if SIMULATE_GAMMA_DETECTOR: #(Only go into this for loop if we're propagating errors starting from the gamma radiations.')
                 #create the following lists once for different product within the same reaction.
+                N0_with_unc_of_each_prod = [] #len=len(all_peaks)=j
                 for j in range(len(all_peaks)): # for each decay product
-                    Omega, intrinsic_efficiency, intensities, decay_constant, count_rates, counts = [], [], [], [], [], [] # len=len(all_peaks_of_this_prod)=i
-                    counts_with_unc, count_rates_with_unc, Nk_with_unc = [], [], [] # len=len(all_peaks_of_this_prod)=i
-                    N0_with_unc_of_each_prod = [] #len=len(all_peaks)=j
+                    #create some empty lists, which will have length=len(all_peaks_of_this_prod)=i
+                    reconstructed_number_of_decayed_atoms = []
                     for i in range(len(all_peaks[j])): #for each peak
                         peak = all_peaks[j][i]
                         # Sum over the count rate from each peak.
-                        Omega.append(               geometric_efficiency() )            # dimensionless
-                        intrinsic_efficiency.append(efficiency_curve(peak['energy']) )  # dimensionless
-                        intensities.append(         peak['intensity'] )                 # dimensionless
-                        count_rates.append(         N_0[j] * intensities[i].n * intrinsic_efficiency[i].n * Omega[i] ) # number of atoms s^-1
-                        counts.append(              count_rates[i] * integrate_count(decay_constant[j], COUNT_TIME).n ) #number of atoms
+                        eff = geometric_efficiency() * photopeak_efficiency(peak['energy'])
+                        #^the error when sampling from different parts of the efficiency curve supposed to be correlated; but I can't be bothered to make it so.
+                        intens = peak['intensity']
+                        initial_count_rate = N_0[j] * intens * eff.n * decay_constant[j]
+                        if initial_count_rate.n>=MIN_COUNT_RATE_PER_MOLE_PARENT and peak['energy'].n==np.clip(peak['energy'].n,*THRESHOLD_ENERGY):
+                            counts = N_0[j] * intens.n * eff.n * integrate_count(decay_constant[j].n, COUNT_TIME) #number of gammas counted
                         
-                        #end of deterministic part; start propagating errors
-                        # Now pretend I've finished acquiring these numbers from the HPGe detector, and obtained the associated uncertainties.
-                        counts_with_unc.append(     add_unc(counts) )
-                        count_rates_with_unc.append(counts_with_unc[i]/ integrate_count(decay_constant[j], COUNT_TIME) )
-                        #theoretically the integrate_count factor should covaries with the half_life used below; but we're simplifying things here and assuming that they are two independent variables right now.
-                        Nk_with_unc.append(         count_rates[i]/(intensities[i] * intrinsic_efficiency[i] * Omega) )
-                    N0_with_unc_of_each_prod.append( compute_weighted_count_rate(Nk_with_unc) )
+                            #end of deterministic part; start propagating errors
+                            # Now pretend I've finished acquiring these numbers from the HPGe detector, and obtained the associated uncertainties.
+                            counts_with_unc = add_unc(counts)
+                            reconstructed_number_of_decayed_atoms.append(counts_with_unc / (eff * intens))
+                            count_rates_with_unc = counts_with_unc/ integrate_count(decay_constant[j], COUNT_TIME)
+                    weighted_average = compute_weighted_average(reconstructed_number_of_decayed_atoms)
+                    if weighted_average is not None:
+                        N0_with_unc_of_each_prod.append( weighted_average/integrate_count(decay_constant[j], COUNT_TIME) )
+                    else:
+                        N0_with_unc_of_each_prod.append(None)
+                        #maximum length of N0_with_unc_of_each_prod is j=len(all_products)=number of nuclides.
                     
                     # Monkey patch in measurement information dictionary
                     product_j = rnr_file.decay[j][0].nuclide['name']
@@ -160,13 +241,13 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, out_dir= sys.argv
                                             }
             else: #assume 100% detection efficiency
                 error_on_N_0 = sqrt(N_0)*(1/sqrt(COUNT_TIME))
-                N0_with_unc_of_each_prod = ary([uncertainties.core.Variable(N_0[i], error_on_N_0[i]) for i in range(len(N_0))])
-            
+                N0_with_unc_of_each_prod = [uncertainties.core.Variable(N_0[j], error_on_N_0[j]) for j in range(len(N_0))]
             all_products = [productlist[0] for productlist in rnr_file.decay]
 
             #add the nuclide into the list
-            if len(N0_with_unc_of_each_prod)>0 and all([type(i)!=type(None) for i in N0_with_unc_of_each_prod]): #only add it if all of its products produces detectible radiation.
-                N_infty_with_unc = sum((N0_with_unc_of_each_prod/decay_correct_factors_with_unc))/len(N0_with_unc_of_each_prod) # assume identical branching ratios
+            if len(N0_with_unc_of_each_prod)>0 and all([(i is not None) for i in N0_with_unc_of_each_prod]): #only add it if all of its products produces detectible radiation.
+                N0_with_unc_of_each_prod = ary(N0_with_unc_of_each_prod)
+                N_infty_with_unc = sum(N0_with_unc_of_each_prod/decay_correct_factors_with_unc)/len(N0_with_unc_of_each_prod) # assume identical branching ratios
                 # N_infty_with_unc = (N0_with_unc_of_each_prod/decay_correct_factors_with_unc)[0] # assume the majority of it becomes the first product listed
                 # N_infty_with_unc = (N0_with_unc_of_each_prod/decay_correct_factors_with_unc)[-1]# assume the majority of it becomes the last product listed
                 
@@ -179,12 +260,11 @@ def R_conversion_main(reaction_and_radiation, apriori_and_unc, out_dir= sys.argv
 
             if len(all_products)>1: # take only the first item in each product list as the representative nuclide information dictionary.
                 print(rname, "has more than 1 product, namely", [prod.nuclide['name'] for prod in all_products] )
-                print("Assuming there is the same probability of decaying into each of these products,")
+                print("Assuming there is the same probability of decaying into either of these products.")
                 print("Parent:", rnr_file.parent)
                 print("Daughters are as follows:")
                 for nuc in [prod.nuclide for prod in all_products]:
                     print(nuc)
-                
     R = pd.DataFrame(_R_matrix, index=r_name_list)
     rr = pd.DataFrame(_counted_rr, index=r_name_list, columns=['value','uncertainty'])
     # new_rname_order = ary(r_name_list)[np.argsort( _counted_rr)][::-1]
@@ -214,8 +294,9 @@ if __name__=='__main__':
     apriori_and_unc, gs_array = read_apriori_and_gs_df(apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
     apriori_func = interpolate_flux(apriori_and_unc['value'].values, gs_array) # Can use a different flux profile if you would like to.
     rdict, dec_r, all_mts = main_read()
-    reaction_and_radiation = main_collapse(apriori_func, gs_array, rdict, dec_r)    
-    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, apriori_and_unc)
+    reaction_and_radiation = main_collapse(apriori_func, gs_array, rdict, dec_r)
+    integrated_apriori = flux_conversion(apriori_and_unc['value'].values, gs_array, 'per eV', 'integrated')
+    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, integrated_apriori) # save only the relevant radiations and rr etc. information out of the reaction_and_radiation dict.
 
     # Tasks
     '''

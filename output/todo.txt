@@ -1,0 +1,21 @@
+____Short:
+Check for overlaps
+Find thickness that saturates detector (i.e. an upper limit)
+Find thickness when error becomes too big (i.e. a lower limit)
+Melting point checker
+What to do with lower energy peaks?
+Save the reusable outputs e.g. efficiencies, intensities, decay correction factor,  into a dictionary (json)
+____Medium:
+Save rdict, dec_r into a pickle object such that they can be opened later for re-collapsing the things.
+	reopen the rdict file, and collapse to find the max. thickness for each bin and each reaction.
+	Print self shielding factor warning just before doing that
+Change library: Carlo's choice (TENDL?)
+Change group structure to fit Robin's needs
+	Examine what group structure may be needed for ChipIR
+Do the convolution function
+	Self shielding: calculate max. thickness allowable such that all bins' contribution remains reasonable.
+FISPACT decay correction factor
+____Long:
+FISPACT: read MT=10 and 33.
+Do regularization unfolding later
+Print self shielding factor warning

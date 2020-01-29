@@ -1,18 +1,31 @@
 from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
 from matplotlib import pyplot as plt
 from convert2R import *
+import json
 
 AREA = pi*3.0**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
 #The only disadvantage to having a foil with too much area is that it must be very thin,
 #perhaps impossible-to-manufature-ly thin, not overexpose the detector.
-THRESHOLD_ENERGY = 1 # keV
+
+def get_histogram(spec_file):
+    with open(spec_file, 'r') as f:
+        spec = json.load(f)
+    rad_list = []
+    for r, prods in spec.items(): 
+        for prod, rads in prods.items(): 
+            for rad, info in rads.items(): 
+                if rad=='gamma' or rad=='xray': 
+                    for peak in info['discrete']: 
+                        rad_list.append(uncertainties.core.Variable(*peak['energy'].split('+/-'))) 
+    return rad_list
+
 def check_overlapping_peaks( energies, intensities, warning_name):
     return
 
 def total_count_rate(radiation_dict):
     for rad, specific_rad in radiation_dict.items():
         if rad=='gamma' or rad=='xray':
-            if specific_rad['energy']>THRESHOLD_ENERGY:
+            if specific_rad['energy']>THRESHOLD:
                 pass
 
 def min_thickness():

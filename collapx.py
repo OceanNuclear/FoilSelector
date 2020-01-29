@@ -127,7 +127,7 @@ class Integrate():
         idx -= x==max(self.x) * 1 # if it equals eactly the upper limit, we need to minus one in order to stop it from overflowing.
         return np.clip(idx, 0, None)
 
-class ReactionAndRadiation():
+class ReactionAndRadiation(): # for storing collapsed cross-sections, specific to that group structure (and apriori, if a non-histogramic apriori is used.).
     def __init__(self, sigma, decay_products_and_radiation, parent_nuclide):
         self.sigma = sigma
         self.decay = decay_products_and_radiation
@@ -227,6 +227,8 @@ def read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_in_fmt='integrated', ap
         apriori_df = pd.read_csv( apriori_file, sep=',|±', engine='python')*apriori_multiplier # tell the apriori and the uncertainty.
         if type(apriori_gs_file)==type(None):
             apriori_gs = gs_array
+        else:
+            raise Warning("Flux rebinning is not yet implemented!")
             #later on, can implement rebinner inside here to change the group structure when necessary.
         apriori_per_eV_df = flux_conversion(flux = apriori_df.T, gs_in_eV = apriori_gs, in_fmt = apriori_in_fmt, out_fmt = 'per eV')
     except Exception as e:
@@ -256,7 +258,7 @@ def main_collapse(apriori_func, gs_array, rdict, dec_r):
                         if type(sigma_g)==type(None):
                             void_reactions.append(rname)
                         else:
-                            reaction_and_radiation[rname] = ReactionAndRadiation(sigma_g, [dec_r[i] for i in r.products_name], r.parent)
+                            reaction_and_radiation[rname] = ReactionAndRadiation(sigma_g, [dec_r[i] for i in sorted(set(r.products_name))], r.parent)
                     elif VERBOSE:
                         print("Ignoring ", rnmae, "as the parent is unstable.")
                     # with open("output/"+file_name, "w") as f:
