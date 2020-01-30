@@ -3,9 +3,6 @@ from matplotlib import pyplot as plt
 from convert2R import *
 import json
 
-AREA = pi*3.0**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
-#The only disadvantage to having a foil with too much area is that it must be very thin,
-#perhaps impossible-to-manufature-ly thin, not overexpose the detector.
 
 def get_histogram(spec_file):
     with open(spec_file, 'r') as f:

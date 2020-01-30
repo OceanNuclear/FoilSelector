@@ -6,10 +6,11 @@ from openmc.data.function import INTERPOLATION_SCHEME
 import openmc
 import warnings
 import pandas as pd
-from ReadData import main_read
+from ReadData import read_reformatted, Reaction
 from collections.abc import Iterable
 from math import fsum
 import os, sys
+import pickle
 
 ALLOW_UNSTABLE_PARENT = True #allowing the unstable nuclide e.g. C14.
 #Set this to true most of the time. There is another option at the top of convert2R to filter out non-naturally occurring elements.
@@ -28,6 +29,18 @@ Exclusions:
 '''
 
 MeV = 1E6 #multiply by this to convert values in MeV to eV
+
+def save_rnr(rnr, working_dir):
+    loc = os.path.join(working_dir, 'reaction_and_radiation.pkl')
+    with open(loc, 'wb') as f:
+        pickle.dump(rnr, f)
+    return
+
+def read_rnr(working_dir=sys.argv[-1]):
+    loc = os.path.join(working_dir, 'reaction_and_radiation.pkl')
+    with open(loc, 'rb') as f:
+        rnr = pickle.load(f)
+    return rnr
 
 def val_to_key_lookup(dic, val):
     for k,v in dic.items():
@@ -64,20 +77,20 @@ def area_between_2_pts(xy1,xy2, xi,scheme):
             return dy*dx/2 + y1*dx
         else:
             return y1*x_ + m*x_**2 /2
-    if scheme==3: # logx, liny
+    elif scheme==3: # logx, liny
         m = dy/dlnx
         if xi==x2:
             return y1*dx + m*(x2*dlnx-dx)
         else:
             return y1*x_ + m*(xi*(lnxi-lnx1)- x_)
             return (y1 - m*lnx1)*x_ + m*(-x_+xi*lnxi-x1*lnx1)
-    if scheme==4: # linx, logy
+    elif scheme==4: # linx, logy
         m = dlny/dx
         if xi==x2:
             return 1/m *dy
         else:
             return 1/m *y1*(exp(x_*m)-1)
-    if scheme==5:
+    elif scheme==5:
         m = dlny/dlnx
         if m==-1:
             return y1 * x1 * (lnxi-lnx1)
@@ -216,8 +229,9 @@ def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori sho
             # Change ^ this line if you want implement covariance in the future.
         return sigma_g #unit: barns
 
-def read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_in_fmt='integrated', apriori_gs_file=None, apriori_multiplier=1, gs_multipliers=1):
+def read_apriori_and_gs_df(out_dir, apriori_in_fmt='integrated', apriori_gs_file=None, apriori_multiplier=1, gs_multipliers=1):
     try:
+        import os, sys
         assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
         gs_file = os.path.join(out_dir, "gs.csv")
         apriori_file = os.path.join(out_dir, "apriori.csv")
@@ -289,7 +303,8 @@ def slideshow(rdict, word=''):
                 plt.clf()
 
 if __name__=='__main__':
-    apriori_and_unc, gs_array = read_apriori_and_gs_df(apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
+    rdict, dec_r, all_mts = read_reformatted(sys.argv[-1])
+    apriori_and_unc, gs_array = read_apriori_and_gs_df(sys.argv[-1], apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
     apriori_func = interpolate_flux(apriori_and_unc['value'].values, gs_array) # Can use a different flux profile if you would like to.
-    rdict, dec_r, all_mts = main_read()
-    reaction_and_radiation = main_collapse(apriori_func, gs_array, rdict, dec_r)
+    rnr = main_collapse(apriori_func, gs_array, rdict, dec_r) # put them all into the same object for easy computation in the next step.
+    save_rnr(rnr, sys.argv[-1])

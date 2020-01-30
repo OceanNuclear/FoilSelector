@@ -1,6 +1,8 @@
 import openmc
 import time 
 from numpy import array as ary; import numpy as np
+import json, pickle
+import os, sys
 # import logging
 # logHanlder = logging.Handler()
 # logging.addHandler(logHanlder)
@@ -20,7 +22,6 @@ EXCLUDE_FISSION = True
 MF = { 'inc':3, 'decay':8, 'inc_covar':33, 'decay_covar':40 , 'general_info':1, 'resonance_params':2, 'decay_multiplicities':9, 'radionuclide_production_cross_section':10}
 def welcome_message():
     try:
-        import os, sys
         folder_list = sys.argv[1:]
         assert len(folder_list)>0
         #Please update your python to 3.6 or later.
@@ -55,6 +56,23 @@ Must use openmc.data.get_evaluations in this manner( using data.endf.Evaulation(
 
 '''
 
+def read_reformatted(working_dir):
+    with open(os.path.join(working_dir, 'reactions.pkl'), 'rb') as f:
+        rdict = pickle.load(f)
+    with open (os.path.join(working_dir, 'decay_radiation.pkl'), 'rb') as f:
+        dec_r = pickle.load(f)
+    with open (os.path.join(working_dir, 'all_mts.json'), 'r') as f:
+        all_mts = json.load(f)
+    return rdict, dec_r, all_mts
+
+def save_reformatted(rdict, dec_r, all_mts, working_dir):
+    with open(os.path.join(working_dir, 'reactions.pkl'), 'wb') as f:
+        pickle.dump(rdict, f)
+    with open (os.path.join(working_dir, 'decay_radiation.pkl'), 'wb') as f:
+        pickle.dump(dec_r, f)
+    with open (os.path.join(working_dir, 'all_mts.json'), 'w') as f:
+        json.dump(all_mts, f)
+    return
 
 class Reaction:
     def __init__(self, openmcRlist, openmc_eval_list, rcomplist, resonances_list, kTs_list):
@@ -292,6 +310,7 @@ def main_read():
 
 if __name__=='__main__':
     rdict, dec_r, all_mts = main_read()
+    save_reformatted(rdict, dec_r, all_mts, sys.argv[-1])
 
 # Next thing to do: deal with the cases where product_num isn't present/is wrong.
 # Turns out all IncidentNeutron objects cannot have reaction 457 stored inside them.

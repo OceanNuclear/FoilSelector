@@ -6,19 +6,18 @@ import pandas as pd
 import json
 from openmc.data import NATURAL_ABUNDANCE
 import uncertainties
-from ReadData import main_read
-from collapx import flux_conversion, main_collapse, MeV, read_apriori_and_gs_df, interpolate_flux, get_scheme
+from collapx import flux_conversion, MeV, read_apriori_and_gs_df, interpolate_flux, get_scheme, read_rnr, ReactionAndRadiation
 import os, sys
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
 SIMULATE_GAMMA_DETECTOR = True
-IRRADIATION_DURATION = 180 #seconds
+IRRADIATION_DURATION = 1 #seconds
 CM2_BARNS_CONVERSION = 1E-24 # convert flux to barns
-COUNT_TIME = 180 # seconds
+COUNT_TIME = 12*3600 # seconds
 USE_NATURAL_ABUNDANCE = True
 VERBOSE = False
-THRESHOLD_ENERGY = [1E5, None] # eV # taking the highest L1 absorption edge as the lower limit
-MIN_COUNT_RATE_PER_MOLE_PARENT = 1E-1
+THRESHOLD_ENERGY = [1E5, 2.6E6] # eV # taking the highest L1 absorption edge as the lower limit
+MIN_COUNT_RATE_PER_MOLE_PARENT = 0.2
 
 # apriori_per_eV has unit cm^-2 s^-1 eV^-1
 def simple_decay_correct(half_life, transit_time): #accounts for the decay between the end of the irradiation period up to the recording period.
@@ -42,7 +41,7 @@ def total_decay_correct(product_list, transit_time=60):
 def geometric_efficiency():
     return 0.5
 
-def HPGe_efficiency_curve_generator(deg=4, cov=True, file_root=sys.argv[-1]):
+def HPGe_efficiency_curve_generator(working_dir, deg=4, cov=True):
     '''
     according to Knoll (equation 12.32), polynomial fit in log-log space is the best.
     This program is trying to do the same.
@@ -58,7 +57,7 @@ def HPGe_efficiency_curve_generator(deg=4, cov=True, file_root=sys.argv[-1]):
     publisher={Elsevier}
     }
     '''
-    file_location = os.path.join(file_root, 'photopeak_efficiency.csv')
+    file_location = os.path.join(working_dir, 'photopeak_efficiency.csv')
     datapoints = pd.read_csv(file_location)
     assert "energ" in datapoints.columns[0].lower(), "The file must contain a header. Energy (eV/MeV) has to be placed in the first column"
     E, eff = datapoints.values.T[:2]
@@ -154,14 +153,25 @@ def turn_Var_into_str(data): #operable on dictionaries.
         pass
     return data
 
-def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.argv[-1]): # for folding to obtain reaction rates and uncertainties.
+def load_rr_R_radiation(working_dir):
+    R_file = os.path.join(working_dir, "Scaled_R_matrx.csv")
+    rr_file = os.path.join(working_dir, "rr.csv")
+    spectra_file = os.path.join(working_dir, "spectra.json")
+    
+    R = pd.read_csv(R_file)
+    rr = pd.read_csv(rr_file)
+    with open(spectra_file, 'r') as f:
+        spectra_json = json.load(f)
+    return R, rr, spectra_json
+
+def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # for folding to obtain reaction rates and uncertainties.
     assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
     R_file, rr_file, spectra_file = os.path.join(out_dir, "Scaled_R_matrx.csv"), os.path.join(out_dir, "rr.csv"), os.path.join(out_dir, "spectra.json")
     spectra_json = {}
     _counted_rr, _R_matrix, r_name_list= [], [], [] # the first tow lists are un-sorted, therefore I prefer to leave them as private variables.
 
     if SIMULATE_GAMMA_DETECTOR:
-        photopeak_efficiency = HPGe_efficiency_curve_generator()
+        photopeak_efficiency = HPGe_efficiency_curve_generator(out_dir)
 
     for rname, rnr_file in reaction_and_radiation.items():
         if USE_NATURAL_ABUNDANCE:
@@ -200,10 +210,11 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.a
             # calculate the expected number of nuclides left at the beginning of the measurement
             N_infty = rnr_file.sigma @ apriori_integrated * IRRADIATION_DURATION * N_target *CM2_BARNS_CONVERSION# unit: number of atoms # assuming flash irradiation
             #   start to split-up the prediction by products, i.e. if there are multiple products, then we'll have to sum them.
-            N_0, decay_correct_factors_with_unc, decay_constant = [], [], []
+            N_0, decay_correct_factors_with_unc, half_life, decay_constant = [], [], [], []
             for product in rnr_file.decay:
                 decay_correct_factors_with_unc.append( total_decay_correct(product) ) # correct for flash irradiation assumption, and then for decay during transit.
                 decay_constant.append( product[0].decay_constant ) #choose the first version of that product that comes up.
+                half_life.append( product[0].half_life )
                 N_0.append( N_infty * decay_correct_factors_with_unc[-1].n )# unit: number of atoms
                 
             if SIMULATE_GAMMA_DETECTOR: #(Only go into this for loop if we're propagating errors starting from the gamma radiations.')
@@ -217,8 +228,12 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.a
                         # Sum over the count rate from each peak.
                         eff = geometric_efficiency() * photopeak_efficiency(peak['energy'])
                         #^the error when sampling from different parts of the efficiency curve supposed to be correlated; but I can't be bothered to make it so.
-                        intens = peak['intensity']
+                        intens = peak['intensity']/100
+
                         initial_count_rate = N_0[j] * intens * eff.n * decay_constant[j]
+                        peak['efficiency'] = eff # add in the detection efficiency too!
+                        #This works because (peak) is linked to the list (all_peaks)
+                        #which is in turn linked to the dictionary (spectra_json) where it is added.
                         if initial_count_rate.n>=MIN_COUNT_RATE_PER_MOLE_PARENT and peak['energy'].n==np.clip(peak['energy'].n,*THRESHOLD_ENERGY):
                             counts = N_0[j] * intens.n * eff.n * integrate_count(decay_constant[j].n, COUNT_TIME) #number of gammas counted
                         
@@ -237,7 +252,11 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.a
                     # Monkey patch in measurement information dictionary
                     product_j = rnr_file.decay[j][0].nuclide['name']
                     spectra_json[rname][product_j]['measurement'] = {"N_0":N_0[j], # For every mole of parent elements/isotope, you'll have this many left at measurement time
-                                            "decay_constant":decay_constant[j] # which will emit radiation at this rate per daughter nuclide.
+                                            "decay_constant":decay_constant[j], # which will emit radiation at this rate per daughter nuclide.
+                                            "half_life": half_life[j],
+                                            "decay_correct_factor": decay_correct_factors_with_unc[j], # fraction remaining after transit from beamline/reactor into detector.
+                                            "fraction_expected_to_decay": integrate_count(decay_constant[j], COUNT_TIME), # fraction of N_0 expected to decay during the length of the measurement time.
+                                            "measurement_time":COUNT_TIME,
                                             }
             else: #assume 100% detection efficiency
                 error_on_N_0 = sqrt(N_0)*(1/sqrt(COUNT_TIME))
@@ -255,7 +274,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.a
                 print(rname, "->", "|".join([prod.nuclide['name'] for prod in all_products])," is added")
                 _R_matrix.append( CM2_BARNS_CONVERSION * ary(rnr_file.sigma) * N_target)
                 r_name_list.append(rname)
-            else:
+            elif VERBOSE:
                 print(f"Not every product of {rname} has a detectible radiation. Therefore it is excluded.")
 
             if len(all_products)>1: # take only the first item in each product list as the representative nuclide information dictionary.
@@ -272,11 +291,12 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.a
     # rr=rr.loc[new_rname_order]
 
     with open(spectra_file, mode='w', encoding='utf-8') as f:
-        json.dump(turn_Var_into_str(spectra_json.copy()), f)
+        spec_copy= spectra_json.copy()
+        json.dump(turn_Var_into_str(spec_copy), f)
     print(f"The spectra for each reaction is saved at {spectra_file}")
     
-    R.to_csv(R_file)
-    rr.to_csv(rr_file)
+    R.to_csv(R_file, index_label='rname')
+    rr.to_csv(rr_file, index_label='rname')
     primer_sentence = "Number of nuclides transmuted after irradiation of "+str(number_of_atoms_of_element())+" of that "
     if USE_NATURAL_ABUNDANCE:
         primer_sentence+= "element in its natural composition"
@@ -291,12 +311,10 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir= sys.a
 
 
 if __name__=='__main__':
-    apriori_and_unc, gs_array = read_apriori_and_gs_df(apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
-    apriori_func = interpolate_flux(apriori_and_unc['value'].values, gs_array) # Can use a different flux profile if you would like to.
-    rdict, dec_r, all_mts = main_read()
-    reaction_and_radiation = main_collapse(apriori_func, gs_array, rdict, dec_r)
-    integrated_apriori = flux_conversion(apriori_and_unc['value'].values, gs_array, 'per eV', 'integrated')
-    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, integrated_apriori) # save only the relevant radiations and rr etc. information out of the reaction_and_radiation dict.
+    reaction_and_radiation = read_rnr()
+    apriori_and_unc, gs_array = read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
+    integrated_apriori  = flux_conversion(  apriori_and_unc['value'].values, gs_array, 'per eV', 'integrated')
+    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, integrated_apriori, out_dir = sys.argv[-1]) # save only the relevant radiations and rr etc. information out of the reaction_and_radiation dict.
 
     # Tasks
     '''
