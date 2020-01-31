@@ -3,6 +3,18 @@ from matplotlib import pyplot as plt
 from convert2R import *
 import json
 
+def num_crossover( func, start, stop, resolution=400, depth=0, max_depth=4):
+    range_to_search = np.linspace(start, stop, num=resolution, endpoint=True)
+    arg_vec = np.argwhere(np.diff([ func(i) for i in range_to_search ]))
+    if len(arg_vec)>1:
+        return True # yes, there is more than one crossing points
+    elif len(arg_vec)==1:
+        if depth<max_depth:
+            return num_crossover(func, range_to_search[crossing], range_to_search[crossing+1], resolution, depth+1, max_depth)
+        else:
+            return False #No, even after max_depth number of zooms, there is still only one crossing point.
+    else:
+        raise ValueError("No crossing point found!")
 
 def get_histogram(spec_file):
     with open(spec_file, 'r') as f:
@@ -15,6 +27,16 @@ def get_histogram(spec_file):
                     for peak in info['discrete']: 
                         rad_list.append(uncertainties.core.Variable(*peak['energy'].split('+/-'))) 
     return rad_list
+
+def get_peak_distances(sorted_energies):
+    num_peaks= len(sorted_energies)
+    dist_array = np.repeat(sorted_energies, num_peaks).reshape([num_peaks,-1])
+    dist_array -= sorted_energies
+    return np.triu(dist_array.T, 1)
+
+def get_confusable_peaks(spec_file):
+    adj_matrix = get_peak_distances()
+    return
 
 def check_overlapping_peaks( energies, intensities, warning_name):
     return

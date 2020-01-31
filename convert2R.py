@@ -11,13 +11,15 @@ import os, sys
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
 SIMULATE_GAMMA_DETECTOR = True
-IRRADIATION_DURATION = 1 #seconds
-CM2_BARNS_CONVERSION = 1E-24 # convert flux to barns
+IRRADIATION_DURATION = 3600 #seconds
 COUNT_TIME = 12*3600 # seconds
 USE_NATURAL_ABUNDANCE = True
 VERBOSE = False
 THRESHOLD_ENERGY = [1E5, 2.6E6] # eV # taking the highest L1 absorption edge as the lower limit
-MIN_COUNT_RATE_PER_MOLE_PARENT = 0.2
+MIN_COUNT_RATE_PER_MOLE_PARENT = 0.05 # Ignore peaks with less than this count rate.
+# A more accurate program would take into account Compton plateau background from higher energy peaks of the same daughter; but I can't be asked to program in the Compton part of the detector response too.
+# Also, if a program can do that, it can probably also DECONVOLUTE the entire spectrum so that the Comptoms are also counted, therefore achieving a higher efficiency anyways.
+CM2_BARNS_CONVERSION = 1E-24 # convert flux to barns
 
 # apriori_per_eV has unit cm^-2 s^-1 eV^-1
 def simple_decay_correct(half_life, transit_time): #accounts for the decay between the end of the irradiation period up to the recording period.
@@ -154,19 +156,19 @@ def turn_Var_into_str(data): #operable on dictionaries.
     return data
 
 def load_rr_R_radiation(working_dir):
-    R_file = os.path.join(working_dir, "Scaled_R_matrx.csv")
+    R_file = os.path.join(working_dir, "R.csv")
     rr_file = os.path.join(working_dir, "rr.csv")
     spectra_file = os.path.join(working_dir, "spectra.json")
     
-    R = pd.read_csv(R_file)
-    rr = pd.read_csv(rr_file)
+    R = pd.read_csv(R_file, index_col=0)
+    rr = pd.read_csv(rr_file, index_col=0)
     with open(spectra_file, 'r') as f:
         spectra_json = json.load(f)
     return R, rr, spectra_json
 
 def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # for folding to obtain reaction rates and uncertainties.
     assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
-    R_file, rr_file, spectra_file = os.path.join(out_dir, "Scaled_R_matrx.csv"), os.path.join(out_dir, "rr.csv"), os.path.join(out_dir, "spectra.json")
+    R_file, rr_file, spectra_file = os.path.join(out_dir, "R.csv"), os.path.join(out_dir, "rr.csv"), os.path.join(out_dir, "spectra.json")
     spectra_json = {}
     _counted_rr, _R_matrix, r_name_list= [], [], [] # the first tow lists are un-sorted, therefore I prefer to leave them as private variables.
 
@@ -269,10 +271,14 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
                 N_infty_with_unc = sum(N0_with_unc_of_each_prod/decay_correct_factors_with_unc)/len(N0_with_unc_of_each_prod) # assume identical branching ratios
                 # N_infty_with_unc = (N0_with_unc_of_each_prod/decay_correct_factors_with_unc)[0] # assume the majority of it becomes the first product listed
                 # N_infty_with_unc = (N0_with_unc_of_each_prod/decay_correct_factors_with_unc)[-1]# assume the majority of it becomes the last product listed
+
+                Rk =  CM2_BARNS_CONVERSION * ary(rnr_file.sigma) * N_target
+                min_N_infty = N_infty_with_unc.n/N_infty_with_unc.s**2 * (Rk.dot(Rk)/MIN_CURVE_CONTR)
+
+                _counted_rr.append([N_infty_with_unc.n, N_infty_with_unc.s, min_N_infty])
+                _R_matrix.append(Rk)
                 
-                _counted_rr.append([N_infty_with_unc.n, N_infty_with_unc.s])
                 print(rname, "->", "|".join([prod.nuclide['name'] for prod in all_products])," is added")
-                _R_matrix.append( CM2_BARNS_CONVERSION * ary(rnr_file.sigma) * N_target)
                 r_name_list.append(rname)
             elif VERBOSE:
                 print(f"Not every product of {rname} has a detectible radiation. Therefore it is excluded.")
@@ -285,7 +291,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
                 for nuc in [prod.nuclide for prod in all_products]:
                     print(nuc)
     R = pd.DataFrame(_R_matrix, index=r_name_list)
-    rr = pd.DataFrame(_counted_rr, index=r_name_list, columns=['value','uncertainty'])
+    rr = pd.DataFrame(_counted_rr, index=r_name_list, columns=['N_infty per mole parent','uncertainty', 'min_N_infty'])
     # new_rname_order = ary(r_name_list)[np.argsort( _counted_rr)][::-1]
     # R = R.loc[new_rname_order]
     # rr=rr.loc[new_rname_order]
@@ -314,6 +320,10 @@ if __name__=='__main__':
     reaction_and_radiation = read_rnr()
     apriori_and_unc, gs_array = read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
     integrated_apriori  = flux_conversion(  apriori_and_unc['value'].values, gs_array, 'per eV', 'integrated')
+    max_localization_resistance = max(integrated_apriori) # unit: cm^4 s^2, i.e. identical to the inverse of square of error on flux.
+    # The smaller the value, the stricter it becomes, requiring more parent atoms.
+    # Vice versa: the larger the value, the more lenient it becomes, asking for a lower minimum thickness later.
+    MIN_CURVE_CONTR = max_localization_resistance**(-2)# minimum contribution to the curvature of chi^2 manifold in phi space. (minimum contribution to ∇χ²)
     R, rr, spectra_json = R_conversion_main(reaction_and_radiation, integrated_apriori, out_dir = sys.argv[-1]) # save only the relevant radiations and rr etc. information out of the reaction_and_radiation dict.
 
     # Tasks

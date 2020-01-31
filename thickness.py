@@ -8,14 +8,19 @@ import uncertainties
 from openmc.data import NATURAL_ABUNDANCE
 import os, sys
 from convert2R import HPGe_efficiency_curve_generator, load_rr_R_radiation, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY, IRRADIATION_DURATION
+from collapx import flux_conversion, MeV, read_apriori_and_gs_df
 from openmc.data import atomic_weight, atomic_mass
 
-MIN_MELTING_POINT = 20 # Degree celcius
-AMPLIFY_LOW_E_GAMMA = False
+MIN_MELTING_POINT = 20 # Degree Celcius
+VERBOSE = False 
 SATURATION_COUNT_RATE = 10E-2/4E-6 #s^-1 # 10% dead time, with each pulse lasting a maximum of 4 microseconds
-VERBOSE = False
 AREA = pi*3.0**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
-CM_TO_MM = 10 #
+AMPLIFY_LOW_E_GAMMA = False # fix the detection efficiency = 0.25 for gamma with energy lower than THRESHOLD_ENERGY[0].
+apriori_and_unc, gs_array = read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
+integrated_apriori  = flux_conversion(  apriori_and_unc['value'].values, gs_array, 'per eV', 'integrated')
+    # It has unit of cm^4 s^2
+
+CM_MM_CONVERSION = 10 #
 #The only disadvantage to having a foil with too much area is that it must be very thin,
 #perhaps impossible-to-manufature-ly thin, not overexpose the detector.
 
@@ -99,61 +104,133 @@ def get_physical_prop(element):
         return physical_properties.loc[best_guess]
 
 material_name, density, melting_point = list(physical_properties.columns)
-def get_density(element):
-    props = get_physical_prop(element)
+def get_density(props):
     if props is not None:
         if np.isnan(props[density]):
-            print("Ignoring 1 entry as the density value for ",element,"is not found")
+            print(f"Ignoring {props} as its density value is not found. ")
         else:
             return props[density]
     else:
-        print("Ignoring 1 entry as no matching solid is found for", element)
+        print(f"Ignoring {props} as no matching solid is found.")
         return None
 
-if __name__=="__main__":
-    R, rr, spectra_json = load_rr_R_radiation(sys.argv[-1])
-    turn_str_back_into_Var(spectra_json)
+def compare_mp(props, mp):
+    if props is not None:
+        if np.isnan(props[melting_point]):
+            print("ignoring t") # for future compatibility
+            print("No melting point found for {0}, accepting it by default.".format(props[material_name]))
+            return True
+        elif props[melting_point]>=mp:
+            return True
+        else:
+            if VERBOSE:
+                print(f"rejecting {element} which has melting point {prop[melting_point]} < {mp}.")
+            return False
+    else:
+        print("No solid found for {0}, accepting it by default".format(element))
+        return True
 
+def get_all_parents(rname_list):
     parents = [] # either contains the isotopes or the elements
     if USE_NATURAL_ABUNDANCE:
-        for r in R.rname:
+        for r in rname_list:
             e = ''.join([c for c in r.split('-')[0] if c.isalpha()])
             if e not in parents:
                 parents.append(e)
         print(len(parents), "elements are considered.\n")
     else:
-        for r in R.rname:
+        for r in rname_list:
             e = r.split('-')[0]
             if e not in parents:
                 parents.append(e)
         print(len(parents), "isotopes are considered.\n")
+    return parents
+
+def check_if_match(long_name, short_name):
+    s = len(short_name)
+    if long_name[:s]!=short_name: #long_name-short_name !=0
+        return False
+    elif len(long_name)==s: # no more characters left on the long name
+        return True
+    else:
+        if long_name[s].isalpha(): # one more letter left
+            return False
+        else:
+            return True
+
+def give_saturation_thicknesses(parents, spectra_json):
     total_counts_pmp = []
+    saturation_thicknesses = {}
     for p in parents:
         count_rate_pmp = []
         for iso, products in spectra_json.items():
             if iso.startswith(p):
                 for prod in products.values():
                     N0_pmp = prod['measurement']['N_0']
+                    dec_constant = prod['measurement']['decay_constant']
                     for rad_name, rad in prod.items():
                         if rad_name in ['gamma', 'xray']:
                             for radiation in rad['discrete']:
                                 if radiation['energy']<THRESHOLD_ENERGY[0] and AMPLIFY_LOW_E_GAMMA:
-                                    count_rate_pmp.append(N0_pmp * radiation['intensity']/100 *0.25) # keep the photopeak efficiency at 50% when the energy is less than 100keV
+                                    count_rate_pmp.append((N0_pmp * dec_constant * radiation['intensity']/100 *0.25).n) # keep the photopeak efficiency at 50% when the energy is less than 100keV
                                 else:
-                                    count_rate_pmp.append(N0_pmp * radiation['intensity']/100 * radiation['efficiency'] )
+                                    count_rate_pmp.append((N0_pmp * dec_constant * radiation['intensity']/100 * radiation['efficiency'] ).n)
                                 # I am aware that the efficiency curve is not accurate when extrapolated to lower energies.
                                 # However we can use various tricks with the electronics to isolate the lower energy pulses.
                                 # so it shouldn't matter too much.
                                 ### NEED TO CONFIRM THIS using AMPLIFY_LOW_E_GAMMA
-        total_counts_pmp.append(sum(count_rate_pmp))
-        max_mole_of_parent = SATURATION_COUNT_RATE/sum(count_rate_pmp)
+        total_count_rate_pmp = sum(count_rate_pmp)
+        max_mole_parent = SATURATION_COUNT_RATE/total_count_rate_pmp
         if USE_NATURAL_ABUNDANCE:
-            dense = get_density(p)
+            props = get_physical_prop(p)
         else:
-            dense = get_density(remove_not_alpha(p[:2]))
-        if dense is not None:
-            vol_pm = atomic_weight(p)/dense
-        max_vol=max_mole_of_parent*vol_pm
-        thickness = max_vol/AREA
-        print(thickness*CM_TO_MM, "mm of foil is allowed for", p)
-        # print(p, sum([i.n for i in count_rate_pmp]))
+            props = get_physical_prop(remove_not_alpha(p[:2]))
+        if props is not None:
+            if (dense:=get_density(props)) is not None and compare_mp(props, MIN_MELTING_POINT): 
+                vol_pm = atomic_weight(p)/dense
+                
+                prop_dict = dict(props.copy())
+                prop_dict.update({"volume per mole (cm3)":vol_pm, 'formula': props.name})
+                
+                max_vol = max_mole_parent*vol_pm
+                max_thickness = max_vol/AREA
+                saturation_thicknesses[p] = {
+                "maximum thickness (cm)":max_thickness,
+                "total count rate per mole parent":total_count_rate_pmp,
+                "physical properties": prop_dict,
+                }
+                print(f"Pure {p} can have a maximum thickness of {max_thickness*CM_MM_CONVERSION} mm")
+        else:
+            print("No matching entries found")
+    return saturation_thicknesses
+
+def add_min_thickness(rr, spectra_json, saturation_thicknesses):
+    thickness_range_df, rname_list = [], []
+    for reaction_name, reaction_info in rr.iterrows():
+        Nk = reaction_info['N_infty per mole parent']
+        min_mol_parent = reaction_info['min_N_infty']/Nk
+        for p, info in saturation_thicknesses.items():
+            is_matching = check_if_match(insert_at_cap(reaction_name, '-').split('-')[0], p)
+            if is_matching:
+                vol_pm = info['physical properties']['volume per mole (cm3)']
+                min_vol = min_mol_parent * vol_pm
+                min_thickness = min_vol/AREA
+                max_thickness = info['maximum thickness (cm)']
+                
+                count_per_vol = info['total count rate per mole parent'] / vol_pm
+                count_rate_per_thickness = count_per_vol * AREA
+                material = info['physical properties'][material_name]
+                formula = info['physical properties']['formula']
+                if min_thickness>max_thickness:
+                    print(reaction_name, "should be discarded as a larger volume than saturation count rate is required to have an appreciable effect when unfolding.")
+                # else:
+                thickness_range_df.append([min_thickness, max_thickness, count_rate_per_thickness, material, formula])
+                rname_list.append(reaction_name)
+    return pd.DataFrame(thickness_range_df, columns=['min thickness', 'max thickness', 'total count rate per cm thickness', 'material', 'formula'], index=rname_list)
+
+if __name__=="__main__":
+    R, rr, spectra_json = load_rr_R_radiation(sys.argv[-1])
+    turn_str_back_into_Var(spectra_json)
+    parents = get_all_parents(rr.index)
+    saturation_thicknesses = give_saturation_thicknesses(parents, spectra_json)
+    thickness_range_df = add_min_thickness(rr, spectra_json, saturation_thicknesses)

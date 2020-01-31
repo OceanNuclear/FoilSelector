@@ -1,21 +1,48 @@
 ____Short:
 Check for overlaps
-Find thickness that saturates detector (i.e. an upper limit)
-Find thickness when error becomes too big (i.e. a lower limit)
-Melting point checker
+#Find thickness that saturates detector (i.e. an upper limit)
+#Find thickness when error becomes too big (i.e. a lower limit)
+#Melting point checker
+#Save the reusable outputs e.g. efficiencies, intensities, decay correction factor,  into a dictionary (json)
 What to do with lower energy peaks?
-Save the reusable outputs e.g. efficiencies, intensities, decay correction factor,  into a dictionary (json)
+Reopen rdict files
+	Print self shielding factor warning just before starting these integrations
+	perform the convolution of \sigma_{rm}*\sigma_{mt}
+	find the max. thickness for each bin and each reaction.
 ____Medium:
-Save rdict, dec_r into a pickle object such that they can be opened later for re-collapsing the things.
-	reopen the rdict file, and collapse to find the max. thickness for each bin and each reaction.
-	Print self shielding factor warning just before doing that
 Change library: Carlo's choice (TENDL?)
 Change group structure to fit Robin's needs
-	Examine what group structure may be needed for ChipIR
-Do the convolution function
+	Examine what group structure may be needed for Ohio
+	Do the flux convert
+Do the multilpication -> integration function
 	Self shielding: calculate max. thickness allowable such that all bins' contribution remains reasonable.
 FISPACT decay correction factor
 ____Long:
 FISPACT: read MT=10 and 33.
 Do regularization unfolding later
 Print self shielding factor warning
+
+Two other reveresed dependencies that needs to be sorted out (both are from FISPACT):
+	Fluence correction factor due to decay during irradiation schedule -> .json file
+	MF=10-> add into dec_r (following the Open/Close principle)
+	MF=33 files -> save an extra file called xscovariance.json (following the Open/Close principle)
+____Running sequence and files generated
+run ReadData.py <ENDF_folders> <working_dir> (EXCLUDE_FISSION)
+	reactions.pkl
+	decay_radiation.pkl
+	all_mts.json
+	# extracted nuclear data files into openmc formats.
+run collapx.py <working_dir> [need additional files: 'apriori.csv' and 'gs.csv'] (ALLOW_UNSTABLE_PARENT, NEGLIGIBLE_FLUX_ABOVE)
+	reaction_and_radiation.pkl
+	# collapsed all cross-sections into multigroup cross-sections values.
+run convert2R.py <working_dir> [need additional files: 'apriori.csv' and 'gs.csv'] (UNWANTED_RADITAION, SIMULATE_GAMMA_DETECTOR, IRRADIATION_DURATION, CM2_BARNS_CONVERSION, COUNT_TIME, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY, MIN_COUNT_RATE_PER_MOLE_PARENT)
+	rr.csv
+	Scaled_R_matrx.csv
+	spectra.csv
+	# gives the R matrix, plus some preliminary filtering to remove undetectible reactions.
+run thickness.py <working_dir>
+	thickness_range.csv
+	# gives the range of thicknesses possible for each reaction
+run rankfoils.py
+	# give warnings about overlapping peaks
+	# rank the R matrices assuming saturation thickness is used for each foil.
