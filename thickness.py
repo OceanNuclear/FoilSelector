@@ -1,4 +1,4 @@
-from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; import numpy as np; tau = 2*pi
+from numpy import exp, cos, arccos, sin, arctan, tan, pi, sqrt; import numpy as np; tau = 2*pi
 from numpy import array as ary
 from numpy import log as ln
 import pandas as pd
@@ -7,19 +7,16 @@ from matplotlib import pyplot as plt
 import uncertainties
 from openmc.data import NATURAL_ABUNDANCE
 import os, sys
-from convert2R import HPGe_efficiency_curve_generator, load_rr_R_radiation, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY, IRRADIATION_DURATION
-from collapx import flux_conversion, MeV, read_apriori_and_gs_df
+from convert2R import HPGe_efficiency_curve_generator, load_rr_R_radiation, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY
+from collapx import flux_conversion, MeV
 from openmc.data import atomic_weight, atomic_mass
 
 MIN_MELTING_POINT = 20 # Degree Celcius
 VERBOSE = False 
-SATURATION_COUNT_RATE = 10E-2/4E-6 #s^-1 # 10% dead time, with each pulse lasting a maximum of 4 microseconds
-AREA = pi*3.0**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
+SATURATION_COUNT_RATE = 10E-2/4E-6 #s^-1 # 10% dead time, assuming each pulse lasting a maximum of 4 microseconds
+AREA = 1 # cm^2 # pi*3.0**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
 AMPLIFY_LOW_E_GAMMA = False # fix the detection efficiency = 0.25 for gamma with energy lower than THRESHOLD_ENERGY[0].
-apriori_and_unc, gs_array = read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
-integrated_apriori  = flux_conversion(  apriori_and_unc['value'].values, gs_array, 'per eV', 'integrated')
-    # It has unit of cm^4 s^2
-
+#The parameter below is for debugging use only.
 CM_MM_CONVERSION = 10 #
 #The only disadvantage to having a foil with too much area is that it must be very thin,
 #perhaps impossible-to-manufature-ly thin, not overexpose the detector.
@@ -56,7 +53,13 @@ def but_actually_in(word, lst_of_words):
             new_list.append(string) 
     return new_list
 
-physical_properties = pd.read_csv('goodfellow_physicalprop.csv', index_col=1, na_values='-')
+phyprop_fname = 'physicalprop.csv'
+try:
+    # assert not sys.argv[-1].endswith('.py'), "An extra argument should be parsed, indicating the output directory"
+    physical_properties = pd.read_csv(os.path.join(sys.argv[-1], phyprop_fname))
+except FileNotFoundError:
+    print(f"No files named {phyprop_fname} found in {sys.argv[-1]}, defaulting to using file {'goodfellow_'+phyprop_fname} in the same directory as {sys.argv[0]}")
+    physical_properties = pd.read_csv('goodfellow_physicalprop.csv', index_col=1, na_values='-')
 
 remove_not_alpha = lambda p: "".join([c for c in p if c.isalpha()])
 
@@ -100,18 +103,20 @@ def get_physical_prop(element):
         if VERBOSE:
             print("Choices for", element, "include", close_match)
         best_guess = close_match[find_closest_match(close_match, element)]
-        print("No exact match, use closest match:", best_guess, ", manual correction for the dilution may be needed.")
+        print(f"No exact match for {element}, use closest match:{best_guess} manual correction for the dilution may be needed.")
         return physical_properties.loc[best_guess]
 
 material_name, density, melting_point = list(physical_properties.columns)
 def get_density(props):
     if props is not None:
+        if "Nickel/Silicon"== props[material_name]: 
+            return 2.329
         if np.isnan(props[density]):
-            print(f"Ignoring {props} as its density value is not found. ")
+            print(f"Ignoring {props[material_name]} ({props.name}) as its density value is not found. ")
         else:
             return props[density]
     else:
-        print(f"Ignoring {props} as no matching solid is found.")
+        print(f"Ignoring {props[material_name]} ({props.name}) as no matching solid is found.")
         return None
 
 def compare_mp(props, mp):
@@ -163,18 +168,25 @@ def give_saturation_thicknesses(parents, spectra_json):
     saturation_thicknesses = {}
     for p in parents:
         count_rate_pmp = []
-        for iso, products in spectra_json.items():
-            if iso.startswith(p):
+        usable_counts_pmp_of = {}
+        for rname, products in spectra_json.items():
+            if rname.startswith(p):
+                usable_counts_pmp_of[rname] = []
                 for prod in products.values():
                     N0_pmp = prod['measurement']['N_0']
                     dec_constant = prod['measurement']['decay_constant']
+                    meas_time = prod['measurement']['measurement_time']
                     for rad_name, rad in prod.items():
                         if rad_name in ['gamma', 'xray']:
                             for radiation in rad['discrete']:
                                 if radiation['energy']<THRESHOLD_ENERGY[0] and AMPLIFY_LOW_E_GAMMA:
-                                    count_rate_pmp.append((N0_pmp * dec_constant * radiation['intensity']/100 *0.25).n) # keep the photopeak efficiency at 50% when the energy is less than 100keV
+                                    fraction_reachable_detector = (N0_pmp  * radiation['intensity']/100 *0.25).n# keep the photopeak efficiency at 50% when the energy is less than 100keV
+                                    count_rate_pmp.append() 
                                 else:
-                                    count_rate_pmp.append((N0_pmp * dec_constant * radiation['intensity']/100 * radiation['efficiency'] ).n)
+                                    fraction_reachable_detector = (N0_pmp * radiation['intensity']/100 * radiation['efficiency'] ).n
+                                count_rate_pmp.append(fraction_reachable_detector * dec_constant.n)
+                                if THRESHOLD_ENERGY[0]<=radiation['energy']<=THRESHOLD_ENERGY[1]:
+                                    usable_counts_pmp_of[rname].append( fraction_reachable_detector * (1-exp(-dec_constant.n*meas_time)) )
                                 # I am aware that the efficiency curve is not accurate when extrapolated to lower energies.
                                 # However we can use various tricks with the electronics to isolate the lower energy pulses.
                                 # so it shouldn't matter too much.
@@ -187,7 +199,10 @@ def give_saturation_thicknesses(parents, spectra_json):
             props = get_physical_prop(remove_not_alpha(p[:2]))
         if props is not None:
             if (dense:=get_density(props)) is not None and compare_mp(props, MIN_MELTING_POINT): 
-                vol_pm = atomic_weight(p)/dense
+                if USE_NATURAL_ABUNDANCE:
+                    vol_pm = atomic_weight(p)/dense
+                else:
+                    vol_pm = atomic_mass(p)/dense
                 
                 prop_dict = dict(props.copy())
                 prop_dict.update({"volume per mole (cm3)":vol_pm, 'formula': props.name})
@@ -198,10 +213,10 @@ def give_saturation_thicknesses(parents, spectra_json):
                 "maximum thickness (cm)":max_thickness,
                 "total count rate per mole parent":total_count_rate_pmp,
                 "physical properties": prop_dict,
+                "usable counts per unit thickness": {rname: ary(counts)/vol_pm*AREA for rname, counts in usable_counts_pmp_of.items()},
                 }
-                print(f"Pure {p} can have a maximum thickness of {max_thickness*CM_MM_CONVERSION} mm")
         else:
-            print("No matching entries found")
+            print("No matching entries found for", p)
     return saturation_thicknesses
 
 def add_min_thickness(rr, spectra_json, saturation_thicknesses):
@@ -217,16 +232,18 @@ def add_min_thickness(rr, spectra_json, saturation_thicknesses):
                 min_thickness = min_vol/AREA
                 max_thickness = info['maximum thickness (cm)']
                 
-                count_per_vol = info['total count rate per mole parent'] / vol_pm
-                count_rate_per_thickness = count_per_vol * AREA
+                count_rate_per_vol = info['total count rate per mole parent'] / vol_pm
+                count_rate_per_thickness = count_rate_per_vol * AREA
                 material = info['physical properties'][material_name]
                 formula = info['physical properties']['formula']
+                half_lives = [prod['measurement']['half_life'] for prod in spectra_json[reaction_name].values()]
                 if min_thickness>max_thickness:
-                    print(reaction_name, "should be discarded as a larger volume than saturation count rate is required to have an appreciable effect when unfolding.")
-                # else:
-                thickness_range_df.append([min_thickness, max_thickness, count_rate_per_thickness, material, formula])
+                    print(reaction_name, "should be discarded as a larger volume than saturation count rate is required to have an appreciable effectiveness when unfolding.")
+                thickness_range_df.append([min_thickness, max_thickness, count_rate_per_thickness, material,
+                formula, info['physical properties'][density], half_lives,
+                sum(info["usable counts per unit thickness"][reaction_name])])
                 rname_list.append(reaction_name)
-    return pd.DataFrame(thickness_range_df, columns=['min thickness', 'max thickness', 'total count rate per cm thickness', 'material', 'formula'], index=rname_list)
+    return pd.DataFrame(thickness_range_df, columns=['min thickness', 'max thickness', 'total count rate per cm thickness', 'material', 'formula', 'density value used', 'half-lives', 'sum of counts from all peaks'], index=rname_list)
 
 if __name__=="__main__":
     R, rr, spectra_json = load_rr_R_radiation(sys.argv[-1])
@@ -234,3 +251,4 @@ if __name__=="__main__":
     parents = get_all_parents(rr.index)
     saturation_thicknesses = give_saturation_thicknesses(parents, spectra_json)
     thickness_range_df = add_min_thickness(rr, spectra_json, saturation_thicknesses)
+    thickness_range_df.to_csv(os.path.join(sys.argv[-1], "thicknesses.csv"), index_label='rname')

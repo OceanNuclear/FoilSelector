@@ -169,7 +169,7 @@ def get_all_mt(iso_dict):
                 inc = openmc.data.IncidentNeutron.from_endf(data)
                 for r in inc.reactions.values():
                     inc_mt[gnd_name].add(r.mt)
-                    all_mts[r.mt] = repr(r)[11:-1].split(" ")[-1]
+                    all_mts[int(r.mt)] = repr(r)[11:-1].split(" ")[-1]
                     if not ( r.mt in inc_r[gnd_name].keys() ): inc_r[gnd_name][r.mt] = [] #if no corresponding list, then start one.
                     inc_r[gnd_name][r.mt].append(r)
                     if not ( r.mt in rcomp[gnd_name].keys() ): rcomp[gnd_name][r.mt] = [] #if no corresponding list, then start one.

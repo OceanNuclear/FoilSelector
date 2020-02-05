@@ -6,20 +6,27 @@ import pandas as pd
 import json
 from openmc.data import NATURAL_ABUNDANCE
 import uncertainties
-from collapx import flux_conversion, MeV, read_apriori_and_gs_df, interpolate_flux, get_scheme, read_rnr, ReactionAndRadiation
-import os, sys
+from collapx import flux_conversion, MeV, read_rnr, ReactionAndRadiation
+from convert_flux import get_integrated_apriori_value_only
+import os, sys, glob
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
 SIMULATE_GAMMA_DETECTOR = True
-IRRADIATION_DURATION = 3600 #seconds
-COUNT_TIME = 12*3600 # seconds
+MAX_OUT_PHOTOPEAK_EFF = False
+IRRADIATION_DURATION = 3*3600 #seconds # Try all different ones
+TRANSIT_TIME = 10*60 # time it takes to turn off the beam, take it out, and put it on the detector.
+COUNT_TIME = 3*3600 # seconds
 USE_NATURAL_ABUNDANCE = True
-VERBOSE = False
-THRESHOLD_ENERGY = [1E5, 2.6E6] # eV # taking the highest L1 absorption edge as the lower limit
-MIN_COUNT_RATE_PER_MOLE_PARENT = 0.05 # Ignore peaks with less than this count rate.
+THRESHOLD_ENERGY = [100E3, 4.6E6] # eV # energy range of gamma that can be detected # taking the highest L1 absorption edge as the lower limit
+MIN_COUNT_PER_MOLE_PARENT = 0.05 # Ignore peaks with less than this count.
+# MIN_COUNT_RATE_PER_MOLE_PARENT = 0 # Ignore peaks with less than this count rate.
 # A more accurate program would take into account Compton plateau background from higher energy peaks of the same daughter; but I can't be asked to program in the Compton part of the detector response too.
 # Also, if a program can do that, it can probably also DECONVOLUTE the entire spectrum so that the Comptoms are also counted, therefore achieving a higher efficiency anyways.
 CM2_BARNS_CONVERSION = 1E-24 # convert flux to barns
+MIN_CURVE_CONTR_MULTIPLER = 1 # allows the minimum thickness to be more lenient when unfolding.
+
+VERBOSE = False
+FOCUS_MODE = False
 
 # apriori_per_eV has unit cm^-2 s^-1 eV^-1
 def simple_decay_correct(half_life, transit_time): #accounts for the decay between the end of the irradiation period up to the recording period.
@@ -28,15 +35,21 @@ def simple_decay_correct(half_life, transit_time): #accounts for the decay betwe
     decay_correct_factor = 2.0**(-transit_time/half_life)
     return decay_correct_factor #should actually return a uncertainties.core.Variable
 
-def fispact_decay_correct():# accounts for the decay etc. during the non-zero irradiation time.
+def fispact_decay_correct(decay_constant, flat_profile=True):# accounts for the decay etc. during the non-zero irradiation time.
     '''
     Number of atoms at the end of the irraidation period
     when modelled as a non-zero irradiation time/ when modelled as a flash irradiation.
     '''
-    return uncertainties.core.Variable(1,0) #again, preferably returns an uncertainties.core.Variable
+    #Batesman equation
+    # return uncertainties.core.Variable(1,0) #again, preferably returns an uncertainties.core.Variable
+    if type(decay_constant) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
+        decay_constant = decay_constant.n
+    simple_corr_fac = (1-exp(-decay_constant*IRRADIATION_DURATION))/(decay_constant*IRRADIATION_DURATION)
+    # The uncertainty part is not implemented yet
+    return simple_corr_fac
 
-def total_decay_correct(product_list, transit_time=60):
-    decay_correct_factor = simple_decay_correct(product_list[0].half_life, transit_time)*fispact_decay_correct() # take only the first item in the product list.
+def total_decay_correct(product_list, transit_time):
+    decay_correct_factor = simple_decay_correct(product_list[0].half_life, transit_time)*fispact_decay_correct(product_list[0].decay_constant) # take only the first item in the product list.
     #use the first version of the file encoutnered to extract the half_life and its uncertainties.
     return decay_correct_factor
 
@@ -59,11 +72,11 @@ def HPGe_efficiency_curve_generator(working_dir, deg=4, cov=True):
     publisher={Elsevier}
     }
     '''
-    file_location = os.path.join(working_dir, 'photopeak_efficiency.csv')
+    file_location = glob.glob(os.path.join(working_dir, '*photopeak_efficiency*.csv'))[0]
     datapoints = pd.read_csv(file_location)
     assert "energ" in datapoints.columns[0].lower(), "The file must contain a header. Energy (eV/MeV) has to be placed in the first column"
     E, eff = datapoints.values.T[:2]
-    if 'MeV' in datapoints.columns[0]:
+    if 'MeV' in datapoints.columns[0] or 'MeV' in file_location:
         E = MeV*E
     if datapoints.values.T[2:].shape[0]>0: # assume that column is the error
         sigma = datapoints.values.T[2]
@@ -102,7 +115,7 @@ def HPGe_efficiency_curve_generator(working_dir, deg=4, cov=True):
         
         if cov:
             lnE_powvector = [lnE**i for i in range(len(p))][::-1]
-            variance_on_lneff = (lnE_powvector@pcov@lnE_powvector) # variance on lneff
+            variance_on_lneff = (lnE_powvector @ pcov @ lnE_powvector) # variance on lneff
             if type(E) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
                 error_of_lnE = E.s/E.n
                 variance_from_E = sum([p[::-1][i]*i*lnE**(i-1) for i in range(1, len(p))])**2 * (error_of_lnE)**2
@@ -112,11 +125,6 @@ def HPGe_efficiency_curve_generator(working_dir, deg=4, cov=True):
         else:
             return exp(lneff)
     return efficiency_curve
-
-def width(energy_in_eV):
-    # assert type(energy_in_eV) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]
-    FWHM_in_eV = 1
-    return FWHM_in_eV
 
 def integrate_count(decay_constant, count_time=COUNT_TIME):
     exponent = -decay_constant*count_time
@@ -140,8 +148,8 @@ def compute_weighted_average(quantities):
     else:
         return None
 
-def number_of_atoms_of_element():
-    return 6.02214076E23 # currently set to one mole
+def one_mole():
+    return 6.02214076E23 # fixed to one mole
 
 def turn_Var_into_str(data): #operable on dictionaries.
     if type(data) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
@@ -166,7 +174,13 @@ def load_rr_R_radiation(working_dir):
         spectra_json = json.load(f)
     return R, rr, spectra_json
 
-def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # for folding to obtain reaction rates and uncertainties.
+def get_min_curve_contr(integrated_apriori):
+    max_localization_resistance = max(integrated_apriori) # unit: cm^4 s^2, i.e. identical to the inverse of square of error on flux.
+    # The smaller the value, the stricter it becomes, requiring more parent atoms.
+    # Vice versa: the larger the value, the more lenient it becomes, asking for a lower minimum thickness later.
+    return max_localization_resistance**(-2) * MIN_CURVE_CONTR_MULTIPLER # minimum contribution to the curvature of chi^2 manifold in phi space. (minimum contribution to ∇χ²)
+
+def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_contr, out_dir): # for folding to obtain reaction rates and uncertainties.
     assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
     R_file, rr_file, spectra_file = os.path.join(out_dir, "R.csv"), os.path.join(out_dir, "rr.csv"), os.path.join(out_dir, "spectra.json")
     spectra_json = {}
@@ -174,17 +188,19 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
 
     if SIMULATE_GAMMA_DETECTOR:
         photopeak_efficiency = HPGe_efficiency_curve_generator(out_dir)
+    if MAX_OUT_PHOTOPEAK_EFF:
+        photopeak_efficiency = lambda x: uncertainties.core.Variable(1, 0)
 
     for rname, rnr_file in reaction_and_radiation.items():
         if USE_NATURAL_ABUNDANCE:
             try:
-                N_target = number_of_atoms_of_element() * NATURAL_ABUNDANCE[rname.split('-')[0]]
+                N_target = one_mole() * NATURAL_ABUNDANCE[rname.split('-')[0]]
             except KeyError:
                 N_target = 0
                 if VERBOSE:
                     print(f"{rname}'s parent is not naturally occurring, and is therefore excluded")
         else:
-            N_target = number_of_atoms_of_element()
+            N_target = one_mole()
         if N_target !=0: #filtering out the non-naturally occuring elements
             all_peaks = []
             spectra_json[rname] = {} # initialize empty dictionary, since we now know there are non-zero number of this naturally occurring element.
@@ -214,7 +230,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
             #   start to split-up the prediction by products, i.e. if there are multiple products, then we'll have to sum them.
             N_0, decay_correct_factors_with_unc, half_life, decay_constant = [], [], [], []
             for product in rnr_file.decay:
-                decay_correct_factors_with_unc.append( total_decay_correct(product) ) # correct for flash irradiation assumption, and then for decay during transit.
+                decay_correct_factors_with_unc.append( total_decay_correct(product, TRANSIT_TIME) ) # correct for flash irradiation assumption, and then for decay during transit.
                 decay_constant.append( product[0].decay_constant ) #choose the first version of that product that comes up.
                 half_life.append( product[0].half_life )
                 N_0.append( N_infty * decay_correct_factors_with_unc[-1].n )# unit: number of atoms
@@ -236,14 +252,17 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
                         peak['efficiency'] = eff # add in the detection efficiency too!
                         #This works because (peak) is linked to the list (all_peaks)
                         #which is in turn linked to the dictionary (spectra_json) where it is added.
-                        if initial_count_rate.n>=MIN_COUNT_RATE_PER_MOLE_PARENT and peak['energy'].n==np.clip(peak['energy'].n,*THRESHOLD_ENERGY):
-                            counts = N_0[j] * intens.n * eff.n * integrate_count(decay_constant[j].n, COUNT_TIME) #number of gammas counted
                         
-                            #end of deterministic part; start propagating errors
-                            # Now pretend I've finished acquiring these numbers from the HPGe detector, and obtained the associated uncertainties.
-                            counts_with_unc = add_unc(counts)
-                            reconstructed_number_of_decayed_atoms.append(counts_with_unc / (eff * intens))
-                            count_rates_with_unc = counts_with_unc/ integrate_count(decay_constant[j], COUNT_TIME)
+                        # if initial_count_rate.n>=MIN_COUNT_RATE_PER_MOLE_PARENT and #Stop using MIN_COUNT_PER_MOLE_PARENT because it's less useful than MIN_COUNT_PER_MOLE_PARENT
+                        if peak['energy'].n==np.clip(peak['energy'].n,*THRESHOLD_ENERGY):
+                            counts = N_0[j] * intens.n * eff.n * integrate_count(decay_constant[j].n, COUNT_TIME) #number of gammas counted
+                            if counts>MIN_COUNT_PER_MOLE_PARENT:
+
+                                #end of deterministic part; start propagating errors
+                                # Now pretend I've finished acquiring these numbers from the HPGe detector, and obtained the associated uncertainties.
+                                counts_with_unc = add_unc(counts)
+                                reconstructed_number_of_decayed_atoms.append(counts_with_unc / (eff * intens))
+                                count_rates_with_unc = counts_with_unc/ integrate_count(decay_constant[j], COUNT_TIME)
                     weighted_average = compute_weighted_average(reconstructed_number_of_decayed_atoms)
                     if weighted_average is not None:
                         N0_with_unc_of_each_prod.append( weighted_average/integrate_count(decay_constant[j], COUNT_TIME) )
@@ -273,23 +292,27 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
                 # N_infty_with_unc = (N0_with_unc_of_each_prod/decay_correct_factors_with_unc)[-1]# assume the majority of it becomes the last product listed
 
                 Rk =  CM2_BARNS_CONVERSION * ary(rnr_file.sigma) * N_target
-                min_N_infty = N_infty_with_unc.n/N_infty_with_unc.s**2 * (Rk.dot(Rk)/MIN_CURVE_CONTR)
+                if N_infty_with_unc.s!=0:
+                    min_N_infty = N_infty_with_unc.n/N_infty_with_unc.s**2 * (Rk.dot(Rk)/min_curve_contr )
+                else:
+                    min_N_infty = 0
 
                 _counted_rr.append([N_infty_with_unc.n, N_infty_with_unc.s, min_N_infty])
                 _R_matrix.append(Rk)
-                
-                print(rname, "->", "|".join([prod.nuclide['name'] for prod in all_products])," is added")
+                if not FOCUS_MODE:
+                    print(rname, "->", "|".join([prod.nuclide['name'] for prod in all_products])," is added")
                 r_name_list.append(rname)
             elif VERBOSE:
                 print(f"Not every product of {rname} has a detectible radiation. Therefore it is excluded.")
 
             if len(all_products)>1: # take only the first item in each product list as the representative nuclide information dictionary.
-                print(rname, "has more than 1 product, namely", [prod.nuclide['name'] for prod in all_products] )
-                print("Assuming there is the same probability of decaying into either of these products.")
-                print("Parent:", rnr_file.parent)
-                print("Daughters are as follows:")
-                for nuc in [prod.nuclide for prod in all_products]:
-                    print(nuc)
+                if not FOCUS_MODE:
+                    print(rname, "has more than 1 product, namely", [prod.nuclide['name'] for prod in all_products] )
+                    print("Assuming there is the same probability of decaying into either of these products.")
+                    print("Parent:", rnr_file.parent)
+                    print("Daughters are as follows:")
+                    for nuc in [prod.nuclide for prod in all_products]:
+                        print(nuc)
     R = pd.DataFrame(_R_matrix, index=r_name_list)
     rr = pd.DataFrame(_counted_rr, index=r_name_list, columns=['N_infty per mole parent','uncertainty', 'min_N_infty'])
     # new_rname_order = ary(r_name_list)[np.argsort( _counted_rr)][::-1]
@@ -303,7 +326,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
     
     R.to_csv(R_file, index_label='rname')
     rr.to_csv(rr_file, index_label='rname')
-    primer_sentence = "Number of nuclides transmuted after irradiation of "+str(number_of_atoms_of_element())+" of that "
+    primer_sentence = "Number of nuclides transmuted after irradiation of "+str(one_mole())+" of that "
     if USE_NATURAL_ABUNDANCE:
         primer_sentence+= "element in its natural composition"
     else:
@@ -311,20 +334,15 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, out_dir): # fo
     print(primer_sentence+"by the un-normalized apriori spectrum for {0}s, along with its measurement uncertainties, is saved in {1}".format(str(IRRADIATION_DURATION), rr_file))
     print(len(rr), "reactions are considered in total.")
     print(R_file, "contains the response matrix with the unit: cm^2")
-    print("I.e. The number of transmutation per parent nuclide per cm^-2 s^-1 of neutron flux, integrated over 1 second = R")
+    print("I.e. The number of transmutation per parent nuclide [k] per cm^2 of neutron fluence (in the i^th bin) = R[k][i]")
 
     return R, rr, spectra_json
 
-
 if __name__=='__main__':
-    reaction_and_radiation = read_rnr()
-    apriori_and_unc, gs_array = read_apriori_and_gs_df(out_dir=sys.argv[-1], apriori_multiplier=1E5, gs_multipliers=MeV) # apriori is read in as eV^-1
-    integrated_apriori  = flux_conversion(  apriori_and_unc['value'].values, gs_array, 'per eV', 'integrated')
-    max_localization_resistance = max(integrated_apriori) # unit: cm^4 s^2, i.e. identical to the inverse of square of error on flux.
-    # The smaller the value, the stricter it becomes, requiring more parent atoms.
-    # Vice versa: the larger the value, the more lenient it becomes, asking for a lower minimum thickness later.
-    MIN_CURVE_CONTR = max_localization_resistance**(-2)# minimum contribution to the curvature of chi^2 manifold in phi space. (minimum contribution to ∇χ²)
-    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, integrated_apriori, out_dir = sys.argv[-1]) # save only the relevant radiations and rr etc. information out of the reaction_and_radiation dict.
+    reaction_and_radiation = read_rnr(sys.argv[-1])
+    integrated_apriori = get_integrated_apriori_value_only(sys.argv[-1])
+    min_curve_contr = get_min_curve_contr(integrated_apriori) 
+    R, rr, spectra_json = R_conversion_main(reaction_and_radiation, integrated_apriori, min_curve_contr, out_dir = sys.argv[-1]) # save only the relevant radiations and rr etc. information out of the reaction_and_radiation dict.
 
     # Tasks
     '''
