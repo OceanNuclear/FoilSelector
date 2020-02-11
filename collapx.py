@@ -14,9 +14,10 @@ from convert_flux import get_continuous_flux, get_gs_ary, integrate_continuous_f
 
 ALLOW_UNSTABLE_PARENT = True #allowing the unstable nuclide e.g. C14.
 #Set this to true most of the time. There is another option at the top of convert2R to filter out non-naturally occurring elements.
+NEGLIGIBLE_FLUX_ABOVE = 1.195E7 # If the cross-section data does not extend up to this value, then we have a problem.
+THERMAL_E = 1/40 #eV
 VERBOSE = False # print all of the ignored nuclide
-NEGLIGIBLE_FLUX_ABOVE = 1.195E7 # If the cross-section data does not extend up to this value, then we have a problem:
-    #Because the nuclear data will be 
+FOCUS_MODE = True
 '''
 Purpose:
     Take in the variable rdict,
@@ -43,10 +44,11 @@ def read_rnr(working_dir):
     return rnr
 
 class ReactionAndRadiation(): # for storing collapsed cross-sections, specific to that group structure (and apriori, if a non-histogramic apriori is used.).
-    def __init__(self, sigma, decay_products_and_radiation, parent_nuclide):
+    def __init__(self, sigma, decay_products_and_radiation, parent_nuclide, thermal_xs):
         self.sigma = sigma
         self.decay = decay_products_and_radiation
         self.parent= parent_nuclide
+        self.thermal_xs = thermal_xs
 
 def flux_conversion(flux, gs_in_eV, in_fmt, out_fmt):
     if in_fmt=='per MeV':
@@ -159,19 +161,26 @@ def main_collapse(apriori_func, gs_array, rdict, dec_r):
                 #
                 if all([i in dec_r.keys() for i in r.products_name]): #only plot it if we know all of the decay products.
                     if ALLOW_UNSTABLE_PARENT or r.parent['stable']:
-                        print("collapsing", rname)
+                        if not FOCUS_MODE:
+                            print("collapsing", rname)
                         sigma_g = collap_xs(r.sigma, gs_array, rname, apriori_per_eV_func=apriori_func) #apriori_and_unc.values[:,0])
+                        thermal_xs = r.sigma([THERMAL_E])[0]
                         if type(sigma_g)==type(None):
                             void_reactions.append(rname)
                         else:
-                            reaction_and_radiation[rname] = ReactionAndRadiation(sigma_g, [dec_r[i] for i in sorted(set(r.products_name))], r.parent)
+                            reaction_and_radiation[rname] = ReactionAndRadiation(sigma_g, [dec_r[i] for i in sorted(set(r.products_name))], r.parent, thermal_xs)
                     elif VERBOSE:
                         print("Ignoring ", rnmae, "as the parent is unstable.")
                     # with open("output/"+file_name, "w") as f:
                     #     f.write(np.array2string(sigma_g))
+                elif 0<sum([i in dec_r.keys() for i in r.products_name])< len(r.products_name):
+                    print("We're getting ",rname,"which has", r.products_name, "but has incomplete record")
+                    print([i in dec_r.keys() for i in r.products_name])
+                    pass
                 elif VERBOSE:
-                    print("Ignoring ", rname, "as the daughter nuclide's decay record is incomplete.")
-            elif VERBOSE:
+                    print("Ignoring ", rname, "as the daughter nuclide's decay record does not exist.")
+                    # pass
+            else:
                 print(rname, "Does not have reaction products listed")
     if VERBOSE:
         print("Ignored the reactions nuclide due to incomplete cross-section data coverage over the "

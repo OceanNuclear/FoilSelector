@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 import uncertainties
 from openmc.data import NATURAL_ABUNDANCE
 import os, sys
-from convert2R import HPGe_efficiency_curve_generator, load_rr_R_radiation, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY
+from convert2R import HPGe_efficiency_curve_generator, load_rr_R_radiation, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY, EVALUATE_THERMAL
 from collapx import flux_conversion, MeV
 from openmc.data import atomic_weight, atomic_mass
 
@@ -168,29 +168,35 @@ def give_saturation_thicknesses(parents, spectra_json):
     saturation_thicknesses = {}
     for p in parents:
         count_rate_pmp = []
-        usable_counts_pmp_of = {}
+        usable_counts_pmp_of, thermal_contribution = {}, {}
         for rname, products in spectra_json.items():
             if rname.startswith(p):
                 usable_counts_pmp_of[rname] = []
-                for prod in products.values():
+                thermal_contribution[rname] = {}
+                for prod_name, prod in products.items():
+                    thermal_contribution[rname][prod] = { prod_name: [] }
                     N0_pmp = prod['measurement']['N_0']
                     dec_constant = prod['measurement']['decay_constant']
+                    dec_corr_fac = prod['measurement']['decay_correct_factor']
                     meas_time = prod['measurement']['measurement_time']
+                    irr_period = prod['measurement']['irradiation_time']
                     for rad_name, rad in prod.items():
                         if rad_name in ['gamma', 'xray']:
                             for radiation in rad['discrete']:
                                 if radiation['energy']<THRESHOLD_ENERGY[0] and AMPLIFY_LOW_E_GAMMA:
-                                    fraction_reachable_detector = (N0_pmp  * radiation['intensity']/100 *0.25).n# keep the photopeak efficiency at 50% when the energy is less than 100keV
+                                    number_reaching_detector = (N0_pmp  * radiation['intensity']/100 *0.25).n# keep the photopeak efficiency at 50% when the energy is less than 100keV
                                     count_rate_pmp.append() 
                                 else:
-                                    fraction_reachable_detector = (N0_pmp * radiation['intensity']/100 * radiation['efficiency'] ).n
-                                count_rate_pmp.append(fraction_reachable_detector * dec_constant.n)
+                                    number_reaching_detector = (N0_pmp * radiation['intensity']/100 * radiation['efficiency'] ).n
+                                count_rate_pmp.append(number_reaching_detector * dec_constant.n)
                                 if THRESHOLD_ENERGY[0]<=radiation['energy']<=THRESHOLD_ENERGY[1]:
-                                    usable_counts_pmp_of[rname].append( fraction_reachable_detector * (1-exp(-dec_constant.n*meas_time)) )
+                                    usable_counts_pmp_of[rname].append( number_reaching_detector * (1-exp(-dec_constant.n*meas_time)) )
                                 # I am aware that the efficiency curve is not accurate when extrapolated to lower energies.
                                 # However we can use various tricks with the electronics to isolate the lower energy pulses.
                                 # so it shouldn't matter too much.
                                 ### NEED TO CONFIRM THIS using AMPLIFY_LOW_E_GAMMA
+                                contr_counts = prod['measurement']['area_pmp'] * dec_corr_fac * (1-exp(-dec_constant.n*meas_time)) * irr_period * radiation['intensity']/100 * radiation['efficiency']
+                                thermal_contribution[rname][prod_name].append(contr_counts)
         total_count_rate_pmp = sum(count_rate_pmp)
         max_mole_parent = SATURATION_COUNT_RATE/total_count_rate_pmp
         if USE_NATURAL_ABUNDANCE:
@@ -214,6 +220,7 @@ def give_saturation_thicknesses(parents, spectra_json):
                 "total count rate per mole parent":total_count_rate_pmp,
                 "physical properties": prop_dict,
                 "usable counts per unit thickness": {rname: ary(counts)/vol_pm*AREA for rname, counts in usable_counts_pmp_of.items()},
+                "counts/(thickness*flux)": {rname: np.sum(list(contr.values()), axis=0)/vol_pm*AREA for rname, contr in thermal_contribution.items()}
                 }
         else:
             print("No matching entries found for", p)
@@ -241,9 +248,13 @@ def add_min_thickness(rr, spectra_json, saturation_thicknesses):
                     print(reaction_name, "should be discarded as a larger volume than saturation count rate is required to have an appreciable effectiveness when unfolding.")
                 thickness_range_df.append([min_thickness, max_thickness, count_rate_per_thickness, material,
                 formula, info['physical properties'][density], half_lives,
-                sum(info["usable counts per unit thickness"][reaction_name])])
+                sum(info["usable counts per unit thickness"][reaction_name]), info["counts/(thickness*flux)"][reaction_name]])
                 rname_list.append(reaction_name)
-    return pd.DataFrame(thickness_range_df, columns=['min thickness', 'max thickness', 'total count rate per cm thickness', 'material', 'formula', 'density value used', 'half-lives', 'sum of counts from all peaks'], index=rname_list)
+    
+    return pd.DataFrame(thickness_range_df, columns=['min thickness', 'max thickness',
+                'total count rate per cm thickness', 'material', 'formula',
+                'density value used', 'half-lives', 'sum of counts from all peaks',
+                'counts per cm thickness per cm-2s-1 thermal flux'], index=rname_list)
 
 if __name__=="__main__":
     R, rr, spectra_json = load_rr_R_radiation(sys.argv[-1])

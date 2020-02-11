@@ -9,6 +9,7 @@ import uncertainties
 from collapx import flux_conversion, MeV, read_rnr, ReactionAndRadiation
 from convert_flux import get_integrated_apriori_value_only
 import os, sys, glob
+import copy
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
 SIMULATE_GAMMA_DETECTOR = True
@@ -18,7 +19,8 @@ TRANSIT_TIME = 10*60 # time it takes to turn off the beam, take it out, and put 
 COUNT_TIME = 3*3600 # seconds
 USE_NATURAL_ABUNDANCE = True
 THRESHOLD_ENERGY = [100E3, 4.6E6] # eV # energy range of gamma that can be detected # taking the highest L1 absorption edge as the lower limit
-MIN_COUNT_PER_MOLE_PARENT = 0.05 # Ignore peaks with less than this count.
+MIN_COUNT_PER_MOLE_PARENT = 1E3 # Ignore peaks with less than this count.
+EVALUATE_THERMAL = True
 # MIN_COUNT_RATE_PER_MOLE_PARENT = 0 # Ignore peaks with less than this count rate.
 # A more accurate program would take into account Compton plateau background from higher energy peaks of the same daughter; but I can't be asked to program in the Compton part of the detector response too.
 # Also, if a program can do that, it can probably also DECONVOLUTE the entire spectrum so that the Comptoms are also counted, therefore achieving a higher efficiency anyways.
@@ -48,8 +50,8 @@ def fispact_decay_correct(decay_constant, flat_profile=True):# accounts for the 
     # The uncertainty part is not implemented yet
     return simple_corr_fac
 
-def total_decay_correct(product_list, transit_time):
-    decay_correct_factor = simple_decay_correct(product_list[0].half_life, transit_time)*fispact_decay_correct(product_list[0].decay_constant) # take only the first item in the product list.
+def total_decay_correct(product_versions, transit_time):
+    decay_correct_factor = simple_decay_correct(product_versions[0].half_life, transit_time)*fispact_decay_correct(product_versions[0].decay_constant) # take only the first item in the product list.
     #use the first version of the file encoutnered to extract the half_life and its uncertainties.
     return decay_correct_factor
 
@@ -278,7 +280,10 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
                                             "decay_correct_factor": decay_correct_factors_with_unc[j], # fraction remaining after transit from beamline/reactor into detector.
                                             "fraction_expected_to_decay": integrate_count(decay_constant[j], COUNT_TIME), # fraction of N_0 expected to decay during the length of the measurement time.
                                             "measurement_time":COUNT_TIME,
+                                            "irradiation_time":IRRADIATION_DURATION
                                             }
+                    if EVALUATE_THERMAL:
+                        spectra_json[rname][product_j]['measurement']['area_pmp'] =  rnr_file.thermal_xs * N_target * CM2_BARNS_CONVERSION
             else: #assume 100% detection efficiency
                 error_on_N_0 = sqrt(N_0)*(1/sqrt(COUNT_TIME))
                 N0_with_unc_of_each_prod = [uncertainties.core.Variable(N_0[j], error_on_N_0[j]) for j in range(len(N_0))]
@@ -320,7 +325,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
     # rr=rr.loc[new_rname_order]
 
     with open(spectra_file, mode='w', encoding='utf-8') as f:
-        spec_copy= spectra_json.copy()
+        spec_copy= copy.deepcopy(spectra_json)
         json.dump(turn_Var_into_str(spec_copy), f)
     print(f"The spectra for each reaction is saved at {spectra_file}")
     

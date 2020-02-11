@@ -1,15 +1,26 @@
 from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
 from matplotlib import pyplot as plt
 import unittest
-from collapx import area_between_2_pts, Integrate, flux_conversion, MeV
+from convert_flux import area_between_2_pts, Integrate, flux_conversion, MeV
 import numpy.random as rn
 from scipy.integrate import quadrature # get gaussian quadrature
 import openmc 
 
 class AreaTest(unittest.TestCase):
-
+    '''
+    def __init__(self):
+        super.__init__(self)
+        self.a=1
+    '''
     # doesn't need an init method
+    '''
+    def setUp(): # overwrites the default
+        with open("somefile.txt", "w") as f:
+            self.data=f.write("words")
 
+    def tearDown():
+        os.remove("somefile.txt")
+    '''
     def fullrange(self, scheme=1):
         PLOT = False
         # rn.seed(0)
@@ -31,8 +42,14 @@ class AreaTest(unittest.TestCase):
             plt.show()
         return np.isclose(quadrature(func, xy1[0], xy2[0], tol=1E-12)[0], area_between_2_pts(xy1, xy2, xy2[0], scheme))
 
+    def loop_through_scheme():
+        for i in range(1,6):
+            assert self.inbetween(i)
+            assert self.fullrange(i)
+
     def test_scheme_1(self):
-        assert self.fullrange(1)
+        assert False
+        # assert self.fullrange(1)
         assert self.inbetween(1)
     def test_scheme_2(self):
         assert self.fullrange(2)

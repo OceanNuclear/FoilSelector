@@ -15,7 +15,7 @@ import csv
 # SHIFT = .7E6 # eV
 SHIFT_FACTOR = 1.05
 RESOLUTION = 90
-CHOICE = 4 # when running the 'Ohio/' folder, use CHOICE=0 for highest energy source (7 ish MeV); CHOICE=2 for lowest energy source.
+CHOICE = 2 # when running the 'Ohio/' folder, use CHOICE=0 for highest energy source (7 ish MeV); CHOICE=2 for lowest energy source.
 def val_to_key_lookup(dic, val):
     for k,v in dic.items():
         if v==val:
@@ -215,6 +215,11 @@ def from_mcnp(argv_1):
     #use histogramic interpolatin instead
     pass
     return
+
+print("INFO: Using point-wise input assumes the flux is continuous.")
+print("Please make sure that there is a valid reason to interpolate the flux as such,")
+print("e.g. the flux is from a source with little to no down-scattering.")
+print("(Down-scattering destroys continuity.)")
 
 def from_pointwise_per_eV(argv_1):
     cross_secs, sources = get_all_csv(argv_1)
