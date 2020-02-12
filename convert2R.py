@@ -16,16 +16,16 @@ SIMULATE_GAMMA_DETECTOR = True
 MAX_OUT_PHOTOPEAK_EFF = False
 IRRADIATION_DURATION = 3*3600 #seconds # Try all different ones
 TRANSIT_TIME = 10*60 # time it takes to turn off the beam, take it out, and put it on the detector.
-COUNT_TIME = 3*3600 # seconds
+COUNT_TIME = 1*3600 # seconds
 USE_NATURAL_ABUNDANCE = True
 THRESHOLD_ENERGY = [100E3, 4.6E6] # eV # energy range of gamma that can be detected # taking the highest L1 absorption edge as the lower limit
 MIN_COUNT_PER_MOLE_PARENT = 1E3 # Ignore peaks with less than this count.
 EVALUATE_THERMAL = True
+MIN_CURVE_CONTR_MULTIPLER = 1 # allows the minimum thickness to be more lenient when unfolding.
 # MIN_COUNT_RATE_PER_MOLE_PARENT = 0 # Ignore peaks with less than this count rate.
 # A more accurate program would take into account Compton plateau background from higher energy peaks of the same daughter; but I can't be asked to program in the Compton part of the detector response too.
 # Also, if a program can do that, it can probably also DECONVOLUTE the entire spectrum so that the Comptoms are also counted, therefore achieving a higher efficiency anyways.
 CM2_BARNS_CONVERSION = 1E-24 # convert flux to barns
-MIN_CURVE_CONTR_MULTIPLER = 1 # allows the minimum thickness to be more lenient when unfolding.
 
 VERBOSE = False
 FOCUS_MODE = False
@@ -153,6 +153,12 @@ def compute_weighted_average(quantities):
 def one_mole():
     return 6.02214076E23 # fixed to one mole
 
+def get_min_curve_contr(integrated_apriori):
+    max_localization_resistance = max(integrated_apriori)*IRRADIATION_DURATION # unit: cm^4 s^2, i.e. identical to the inverse of square of error on flux.
+    # The smaller the value, the stricter it becomes, requiring more parent atoms.
+    # Vice versa: the larger the value, the more lenient it becomes, asking for a lower minimum thickness later.
+    return max_localization_resistance**(-2) * MIN_CURVE_CONTR_MULTIPLER # minimum contribution to the curvature of chi^2 manifold in phi space. (minimum contribution to ∇χ²)
+
 def turn_Var_into_str(data): #operable on dictionaries.
     if type(data) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
         data = str(data.n) + str("+/-")+str(data.s)
@@ -175,12 +181,6 @@ def load_rr_R_radiation(working_dir):
     with open(spectra_file, 'r') as f:
         spectra_json = json.load(f)
     return R, rr, spectra_json
-
-def get_min_curve_contr(integrated_apriori):
-    max_localization_resistance = max(integrated_apriori) # unit: cm^4 s^2, i.e. identical to the inverse of square of error on flux.
-    # The smaller the value, the stricter it becomes, requiring more parent atoms.
-    # Vice versa: the larger the value, the more lenient it becomes, asking for a lower minimum thickness later.
-    return max_localization_resistance**(-2) * MIN_CURVE_CONTR_MULTIPLER # minimum contribution to the curvature of chi^2 manifold in phi space. (minimum contribution to ∇χ²)
 
 def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_contr, out_dir): # for folding to obtain reaction rates and uncertainties.
     assert os.path.exists(out_dir), "Please create directory {0} to save the output files in first.".format(out_dir)
@@ -295,14 +295,9 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
                 N_infty_with_unc = sum(N0_with_unc_of_each_prod/decay_correct_factors_with_unc)/len(N0_with_unc_of_each_prod) # assume identical branching ratios
                 # N_infty_with_unc = (N0_with_unc_of_each_prod/decay_correct_factors_with_unc)[0] # assume the majority of it becomes the first product listed
                 # N_infty_with_unc = (N0_with_unc_of_each_prod/decay_correct_factors_with_unc)[-1]# assume the majority of it becomes the last product listed
-
                 Rk =  CM2_BARNS_CONVERSION * ary(rnr_file.sigma) * N_target
-                if N_infty_with_unc.s!=0:
-                    min_N_infty = N_infty_with_unc.n/N_infty_with_unc.s**2 * (Rk.dot(Rk)/min_curve_contr )
-                else:
-                    min_N_infty = 0
-
-                _counted_rr.append([N_infty_with_unc.n, N_infty_with_unc.s, min_N_infty])
+                min_mole_p = min_curve_contr / Rk.dot(Rk) * N_infty_with_unc.s**2
+                _counted_rr.append([N_infty_with_unc.n, N_infty_with_unc.s, min_mole_p])
                 _R_matrix.append(Rk)
                 if not FOCUS_MODE:
                     print(rname, "->", "|".join([prod.nuclide['name'] for prod in all_products])," is added")
@@ -319,7 +314,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
                     for nuc in [prod.nuclide for prod in all_products]:
                         print(nuc)
     R = pd.DataFrame(_R_matrix, index=r_name_list)
-    rr = pd.DataFrame(_counted_rr, index=r_name_list, columns=['N_infty per mole parent','uncertainty', 'min_N_infty'])
+    rr = pd.DataFrame(_counted_rr, index=r_name_list, columns=['N_infty per mole parent','uncertainty', 'min mole of parent'])
     # new_rname_order = ary(r_name_list)[np.argsort( _counted_rr)][::-1]
     # R = R.loc[new_rname_order]
     # rr=rr.loc[new_rname_order]
@@ -339,7 +334,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
     print(primer_sentence+"by the un-normalized apriori spectrum for {0}s, along with its measurement uncertainties, is saved in {1}".format(str(IRRADIATION_DURATION), rr_file))
     print(len(rr), "reactions are considered in total.")
     print(R_file, "contains the response matrix with the unit: cm^2")
-    print("I.e. The number of transmutation per parent nuclide [k] per cm^2 of neutron fluence (in the i^th bin) = R[k][i]")
+    print("I.e. The number of transmutation per mole parent of nuclide [k] per cm^-2 of neutron fluence (in the i^th bin) = R[k][i]")
 
     return R, rr, spectra_json
 

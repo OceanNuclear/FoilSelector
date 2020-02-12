@@ -14,8 +14,8 @@ from openmc.data import atomic_weight, atomic_mass
 MIN_MELTING_POINT = 20 # Degree Celcius
 VERBOSE = False 
 SATURATION_COUNT_RATE = 10E-2/4E-6 #s^-1 # 10% dead time, assuming each pulse lasting a maximum of 4 microseconds
-AREA = 1 # cm^2 # pi*3.0**2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
-AMPLIFY_LOW_E_GAMMA = False # fix the detection efficiency = 0.25 for gamma with energy lower than THRESHOLD_ENERGY[0].
+AREA = 1 # cm^2 # The bigger the area, the less thickness is required to reach a detectible limit, thus self-shielding distortion of the true spectrum.
+# AMPLIFY_LOW_E_GAMMA = False # fix the detection efficiency = 0.25 for gamma with energy lower than THRESHOLD_ENERGY[0].
 #The parameter below is for debugging use only.
 CM_MM_CONVERSION = 10 #
 #The only disadvantage to having a foil with too much area is that it must be very thin,
@@ -174,7 +174,7 @@ def give_saturation_thicknesses(parents, spectra_json):
                 usable_counts_pmp_of[rname] = []
                 thermal_contribution[rname] = {}
                 for prod_name, prod in products.items():
-                    thermal_contribution[rname][prod] = { prod_name: [] }
+                    thermal_contribution[rname] = { prod_name: [] }
                     N0_pmp = prod['measurement']['N_0']
                     dec_constant = prod['measurement']['decay_constant']
                     dec_corr_fac = prod['measurement']['decay_correct_factor']
@@ -183,7 +183,8 @@ def give_saturation_thicknesses(parents, spectra_json):
                     for rad_name, rad in prod.items():
                         if rad_name in ['gamma', 'xray']:
                             for radiation in rad['discrete']:
-                                if radiation['energy']<THRESHOLD_ENERGY[0] and AMPLIFY_LOW_E_GAMMA:
+                                if False:
+                                # if radiation['energy']<THRESHOLD_ENERGY[0] and AMPLIFY_LOW_E_GAMMA:
                                     number_reaching_detector = (N0_pmp  * radiation['intensity']/100 *0.25).n# keep the photopeak efficiency at 50% when the energy is less than 100keV
                                     count_rate_pmp.append() 
                                 else:
@@ -198,7 +199,7 @@ def give_saturation_thicknesses(parents, spectra_json):
                                 contr_counts = prod['measurement']['area_pmp'] * dec_corr_fac * (1-exp(-dec_constant.n*meas_time)) * irr_period * radiation['intensity']/100 * radiation['efficiency']
                                 thermal_contribution[rname][prod_name].append(contr_counts)
         total_count_rate_pmp = sum(count_rate_pmp)
-        max_mole_parent = SATURATION_COUNT_RATE/total_count_rate_pmp
+        max_mole_parent = SATURATION_COUNT_RATE / total_count_rate_pmp
         if USE_NATURAL_ABUNDANCE:
             props = get_physical_prop(p)
         else:
@@ -226,11 +227,11 @@ def give_saturation_thicknesses(parents, spectra_json):
             print("No matching entries found for", p)
     return saturation_thicknesses
 
-def add_min_thickness(rr, spectra_json, saturation_thicknesses):
+def add_min_thickness(R, rr, spectra_json, saturation_thicknesses):
     thickness_range_df, rname_list = [], []
     for reaction_name, reaction_info in rr.iterrows():
-        Nk = reaction_info['N_infty per mole parent']
-        min_mol_parent = reaction_info['min_N_infty']/Nk
+        # Nk_pmp = reaction_info['N_infty per mole parent']
+        min_mol_parent = reaction_info['min mole of parent']
         for p, info in saturation_thicknesses.items():
             is_matching = check_if_match(insert_at_cap(reaction_name, '-').split('-')[0], p)
             if is_matching:
@@ -248,18 +249,20 @@ def add_min_thickness(rr, spectra_json, saturation_thicknesses):
                     print(reaction_name, "should be discarded as a larger volume than saturation count rate is required to have an appreciable effectiveness when unfolding.")
                 thickness_range_df.append([min_thickness, max_thickness, count_rate_per_thickness, material,
                 formula, info['physical properties'][density], half_lives,
-                sum(info["usable counts per unit thickness"][reaction_name]), info["counts/(thickness*flux)"][reaction_name]])
+                # sum(info["usable counts per unit thickness"][reaction_name]), info["counts/(thickness*flux)"][reaction_name]])
+                sum(info["usable counts per unit thickness"][reaction_name])])
                 rname_list.append(reaction_name)
     
     return pd.DataFrame(thickness_range_df, columns=['min thickness', 'max thickness',
                 'total count rate per cm thickness', 'material', 'formula',
                 'density value used', 'half-lives', 'sum of counts from all peaks',
-                'counts per cm thickness per cm-2s-1 thermal flux'], index=rname_list)
+                # 'counts per cm thickness per cm-2s-1 thermal flux'], index=rname_list)
+                ], index=rname_list)
 
 if __name__=="__main__":
     R, rr, spectra_json = load_rr_R_radiation(sys.argv[-1])
     turn_str_back_into_Var(spectra_json)
     parents = get_all_parents(rr.index)
     saturation_thicknesses = give_saturation_thicknesses(parents, spectra_json)
-    thickness_range_df = add_min_thickness(rr, spectra_json, saturation_thicknesses)
+    thickness_range_df = add_min_thickness(R, rr, spectra_json, saturation_thicknesses)
     thickness_range_df.to_csv(os.path.join(sys.argv[-1], "thicknesses.csv"), index_label='rname')
