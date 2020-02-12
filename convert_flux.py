@@ -13,9 +13,9 @@ MeV=1E6
 VERBOSE = True
 import csv
 # SHIFT = .7E6 # eV
-SHIFT_FACTOR = 1.05
+SCALE_FACTOR = 1.04
 RESOLUTION = 90
-CHOICE = 2 # when running the 'Ohio/' folder, use CHOICE=0 for highest energy source (7 ish MeV); CHOICE=2 for lowest energy source.
+CHOICE = 1 # when running the 'Ohio/' folder, use CHOICE=0 for highest energy source (7 ish MeV); CHOICE=2 for lowest energy source.
 def val_to_key_lookup(dic, val):
     for k,v in dic.items():
         if v==val:
@@ -291,7 +291,7 @@ def from_pointwise_per_eV(argv_1):
     
     #Now do the conversion
     pointwise_apriori_flux_per_eV = source_df[CHOICE]
-    pointwise_apriori_flux_per_eV[pointwise_apriori_flux_per_eV.columns[0]] = pointwise_apriori_flux_per_eV[pointwise_apriori_flux_per_eV.columns[0]] * SHIFT_FACTOR
+    pointwise_apriori_flux_per_eV[pointwise_apriori_flux_per_eV.columns[0]] = pointwise_apriori_flux_per_eV[pointwise_apriori_flux_per_eV.columns[0]] * SCALE_FACTOR
     E = np.linspace(*extended_range, 5000)
             
     apriori_func = convert_to_func(*pointwise_apriori_flux_per_eV.values.T, scheme=get_scheme("log-log"))
