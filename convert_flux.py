@@ -9,9 +9,9 @@ import pandas as pd
 import openmc
 from openmc.data.function import INTERPOLATION_SCHEME #y,x
 import pickle
+import csv
 MeV=1E6
 VERBOSE = True
-import csv
 # SHIFT = .7E6 # eV
 SCALE_FACTOR = 1.04
 RESOLUTION = 90
@@ -172,6 +172,8 @@ def flux_conversion(flux_in, gs_in_eV, in_fmt, out_fmt):
         leth_space = np.diff(ln(gs_in_eV), axis=1).flatten()
         flux_integrated = flux*leth_space
         flux_per_eV = flux_conversion(flux_integrated, gs_in_eV, 'integrated', 'per eV')
+    elif in_fmt=='per keV':
+        flux_per_eV = flux/1E3
     else:
         assert in_fmt=="per eV", "the input format 'i' must be one of the following 4='integrated'|'PUL'(per unit lethargy)|'per (M)eV'"
         flux_per_eV = flux
@@ -368,7 +370,7 @@ if __name__=="__main__":
                 gs_file = os.path.join(sys.argv[-1], action.split()[2])
                 has_header = sn.has_header(ap_file)
                 pd.read_csv(flux_in)
-                gs_array = os.path.join(sys.argv[-1], action.split())
+                # gs_array = os.path.join(sys.argv[-1], action.split())
             elif "scaledownto"==action.split()[0]:
                 fluxfile = os.path.join(sys.argv[-1], action.split()[1])
                 outfile = os.path.join(sys.argv[-1], "new_"+action.split()[1])

@@ -351,7 +351,7 @@ if __name__=='__main__':
     # Tests:
     '''
     1. The SIMULATE_GAMMA_DETECTOR=True should perform slightly worse (with larger uncertainties, but same means) than SIMULATE_GAMMA_DETECTOR=False
-    2. Increasing COUNT_TIME should asymptotically improve the uncertainties to a limit.
-    3. Fast decaying should be affected more by increasing IRRADIATION_DURATION than slow decaying.
-    4. Use the integration function of the Tabulated1D properly.
+    2. Increasing COUNT_TIME should asymptotically improve the uncertainties to a limit. #DONE
+    3. Fast decaying should be affected more by increasing IRRADIATION_DURATION than slow decaying. #DONE
+    4. Use the integration function of the Tabulated1D properly. #DONE, see test
     '''
