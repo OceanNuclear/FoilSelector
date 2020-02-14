@@ -213,11 +213,6 @@ def get_gs_ary(folder):
     gs = pd.read_csv(full_file_path)
     return gs.values    
 
-def from_mcnp(argv_1):
-    #use histogramic interpolatin instead
-    pass
-    return
-
 print("INFO: Using point-wise input assumes the flux is continuous.")
 print("Please make sure that there is a valid reason to interpolate the flux as such,")
 print("e.g. the flux is from a source with little to no down-scattering.")
@@ -326,9 +321,9 @@ def from_pointwise_per_eV(argv_1):
 
 def simple_multiply(infile, outfile, xscale_factor=1, yscale_factor=1, **kwargs):
     df = pd.read_csv(infile, **kwargs)
-    columns = df.columns
-    df[columns[0]] = df[columns[0]]*xscale_factor
-    df[columns[1]] = df[columns[1]]*yscale_factor
+    col = df.columns
+    df[col[0]] = df[col[0]]*xscale_factor
+    df[col[1]] = df[col[1]]*yscale_factor
     df.to_csv(outfile, index=False)
     return df
 
