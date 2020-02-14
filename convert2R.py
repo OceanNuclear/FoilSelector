@@ -7,7 +7,7 @@ import json
 from openmc.data import NATURAL_ABUNDANCE
 import uncertainties
 from collapx import flux_conversion, MeV, read_rnr, ReactionAndRadiation
-from convert_flux import get_integrated_apriori_value_only
+from flux_convert import get_integrated_apriori_value_only
 import os, sys, glob
 import copy
 

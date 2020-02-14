@@ -1,7 +1,7 @@
 from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
 from matplotlib import pyplot as plt
 import unittest
-from convert_flux import area_between_2_pts, Integrate, flux_conversion, MeV
+from flux_convert import area_between_2_pts, Integrate, flux_conversion, MeV
 import numpy.random as rn
 from scipy.integrate import quadrature # get gaussian quadrature
 import openmc 

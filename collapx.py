@@ -9,8 +9,7 @@ import pandas as pd
 from ReadData import read_reformatted, Reaction # the Reaction class is needed in order to load the pkl file in without raising an error.
 import os, sys
 import pickle
-from convert_flux import get_scheme, loglog, histogramic, Integrate
-from convert_flux import get_continuous_flux, get_gs_ary, integrate_continuous_flux # will have to use the integrate_continuous_flux soon
+from flux_convert import Integrate, get_continuous_flux, get_gs_ary, integrate_continuous_flux
 
 ALLOW_UNSTABLE_PARENT = True #allowing the unstable nuclide e.g. C14.
 #Set this to true most of the time. There is another option at the top of convert2R to filter out non-naturally occurring elements.
@@ -135,7 +134,7 @@ def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori sho
 #         if type(apriori_gs_file)==type(None):
 #             apriori_gs = gs_array
 #         else:
-#             raise DeprecationWarning(f"Flux rebinning should be done in a different module than {sys.argv[0]}, e.g. in convert_flux.py")
+#             raise DeprecationWarning(f"Flux rebinning should be done in a different module than {sys.argv[0]}, e.g. in flux_convert.py")
 #             sys.exit()
 #             #later on, can implement rebinner inside here to change the group structure when necessary.
 #         apriori_per_eV_df = flux_conversion(flux = apriori_df.T, gs_in_eV = apriori_gs, in_fmt = apriori_in_fmt, out_fmt = 'per eV')
