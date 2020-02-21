@@ -38,7 +38,7 @@ python3 thicknes.py my_directory/
 ```
 
 ReadData.py
-- requires None
+- requires no files in my_directory/
 - generates "decay_radiation.pkl", "reactions.pkl", "all_mts.json"
 
 collapx.py
@@ -54,7 +54,7 @@ thickness.py
 - generates thickness.csv (documents the allowed range of thickness for each reaction/foil)
 
 Several f-strings with self-documenting expressions are used for printing information, therefore python3.8+ is required. However, one can search and replace all f-strings to side-step this problem.
-
+<!-- 
 ## Data preparation
 - > User action required: Unzip .zip file containing nuclear data in the ```RawCrossSection/``` directory, as endf format.
 1.	Read the list of elements, their elemental fractions, and their respective reactions.
@@ -146,3 +146,4 @@ For each reaction,
 4.	Assume that the shape of the neutron flux distribution in energy space does not vary; it simply goes up and down with the total flux. (Alternative: can fit empirical function describing relationship between total neutron flux and skewedness of the flux.)
 5.	Use all the peaks avaiable for every daughter nuclide created.
 6.	Maximize the volume to reduce the uncertainty in number of counts.
+ -->
