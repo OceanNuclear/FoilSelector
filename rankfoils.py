@@ -1,20 +1,41 @@
 from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
 from matplotlib import pyplot as plt
-from convert2R import *
+from convert2R import THRESHOLD_ENERGY, load_R_rr_radiation
+import pandas as pd
 import json
+from scipy.optimize import curve_fit
+from os.path import join, basename
+import sys
 
-def num_crossover( func, start, stop, resolution=400, depth=0, max_depth=4):
-    range_to_search = np.linspace(start, stop, num=resolution, endpoint=True)
-    arg_vec = np.argwhere(np.diff([ func(i) for i in range_to_search ]))
-    if len(arg_vec)>1:
-        return True # yes, there is more than one crossing points
-    elif len(arg_vec)==1:
-        if depth<max_depth:
-            return num_crossover(func, range_to_search[crossing], range_to_search[crossing+1], resolution, depth+1, max_depth)
-        else:
-            return False #No, even after max_depth number of zooms, there is still only one crossing point.
-    else:
-        raise ValueError("No crossing point found!")
+def FWHM_ftting_func(E, a, b):
+    return a + sqrt(b*E)
+
+def get_FWHM_file(directory):
+    E, FWHM_val, FWHM_error = pd.read_csv(join(directory, "FWHM.csv"), comment='#').values.T
+    return E, FWHM_val, FWHM_error
+
+def get_func(E, FWHM_val, **kwargs):
+    [a0,b0], cov = curve_fit(FWHM_ftting_func, E, FWHM_val, **kwargs)
+    func = lambda E: FWHM_ftting_func(E, a0, b0)
+    setattr(func, 'a', a0)
+    setattr(func, 'b', b0)
+    return func
+
+def get_peak_sigma(FWHM_func, E):
+    return FWHM_func(E)/2.355
+
+# def num_crossover( func, start, stop, resolution=400, depth=0, max_depth=4):
+#     range_to_search = np.linspace(start, stop, num=resolution, endpoint=True)
+#     arg_vec = np.argwhere(np.diff([ func(i) for i in range_to_search ]))
+#     if len(arg_vec)>1:
+#         return True # yes, there is more than one crossing points
+#     elif len(arg_vec)==1:
+#         if depth<max_depth:
+#             return num_crossover(func, range_to_search[crossing], range_to_search[crossing+1], resolution, depth+1, max_depth)
+#         else:
+#             return False #No, even after max_depth number of zooms, there is still only one crossing point.
+#     else:
+#         raise ValueError("No crossing point found!")
 
 def get_histogram(spec_file):
     with open(spec_file, 'r') as f:
@@ -34,26 +55,60 @@ def get_peak_distances(sorted_energies):
     dist_array -= sorted_energies
     return np.triu(dist_array.T, 1)
 
-def get_confusable_peaks(spec_file):
-    adj_matrix = get_peak_distances()
+def get_confusable_peaks(E1, E2):
+    # if within 3 FWHM of each other:
     return
-
-def check_overlapping_peaks( energies, intensities, warning_name):
-    return
-
-def total_count_rate(radiation_dict):
-    for rad, specific_rad in radiation_dict.items():
-        if rad=='gamma' or rad=='xray':
-            if specific_rad['energy']>THRESHOLD:
-                pass
 
 def min_thickness():
     detectible_limit = 3*noise_level
     return
 
-def max_thickness(deadtime_percent=5):
-    saturation_limit
-    return 
+def perform_fit(directory):
+    E, FWHM_val, FWHM_error = get_FWHM_file(directory)
+    Esmooth = np.linspace(*THRESHOLD_ENERGY)
+    fit = get_func(E, FWHM_val, sigma=FWHM_error)
+    print(f"{fit.a=}, {fit.b=}")
+    plt.errorbar(E, FWHM_val, yerr=FWHM_error, linestyle='', capsize=5)
+    plt.plot(Esmooth, fit(Esmooth))
+    plt.ylim(0)
+    plt.xlabel('energy (eV)')
+    plt.ylabel('FWHM (eV)')
+    plt.title("Fit of the FWHM of the peaks")
+    plt.show()
+    return fit
+
+def ask_yn_question(question):
+    while True:
+        answer = input(question)
+        if answer.lower() in ['y', 'yes']:
+            return True
+        elif answer.lower() in ['n', 'no']:
+            return False
+        else:
+            print(f"Sorry {answer} not understood")
+
+def append_into_dict(d, key, element):
+    if key in d.keys():
+        d[key].append(element)
+    else:
+        d[key]=[element,]
+
+if __name__=="__main__":
+    while True:
+        FWHM_func = perform_fit(sys.argv[-1])
+        if ask_yn_question("Satisfied with the fit?"):
+            break
+    print("Checking the spectrum for overlaps...")
+    R, rr, spectra_json = load_R_rr_radiation(sys.argv[-1])
+    spectrum = {rname:spectra_json[rname] for rname in rr.index}
+    all_rad,all_prod = {}, {}
+    for rname, reaction in spectrum.items():
+        for daughter, decay in reaction.items():
+            append_into_dict(all_prod, rname, daughter)
+            for radname, radiation in decay.items():
+                if radname in ['xray', 'gamma']:
+                    for peak in radiation['discrete']:
+                        append_into_dict(all_rad, rname)
 '''
     Achieved:
 -Filter fissile/fissionable materials

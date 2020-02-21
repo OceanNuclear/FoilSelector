@@ -7,9 +7,10 @@ from matplotlib import pyplot as plt
 import uncertainties
 from openmc.data import NATURAL_ABUNDANCE
 import os, sys
-from convert2R import HPGe_efficiency_curve_generator, load_rr_R_radiation, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY, EVALUATE_THERMAL
+from convert2R import HPGe_efficiency_curve_generator, load_R_rr_radiation, USE_NATURAL_ABUNDANCE, THRESHOLD_ENERGY, EVALUATE_THERMAL, serialize
 from collapx import flux_conversion, MeV
 from openmc.data import atomic_weight, atomic_mass
+import copy
 
 MIN_MELTING_POINT = 20 # Degree Celcius
 VERBOSE = False 
@@ -163,7 +164,7 @@ def check_if_match(long_name, short_name):
         else:
             return True
 
-def give_saturation_thicknesses(parents, spectra_json):
+def add_saturation_thicknesses(parents, spectra_json):
     total_counts_pmp = []
     saturation_thicknesses = {}
     for p in parents:
@@ -184,11 +185,12 @@ def give_saturation_thicknesses(parents, spectra_json):
                         if rad_name in ['gamma', 'xray']:
                             for radiation in rad['discrete']:
                                 if False:
-                                # if radiation['energy']<THRESHOLD_ENERGY[0] and AMPLIFY_LOW_E_GAMMA:
+                                    # if radiation['energy']<THRESHOLD_ENERGY[0] and AMPLIFY_LOW_E_GAMMA:
                                     number_reaching_detector = (N0_pmp  * radiation['intensity']/100 *0.25).n# keep the photopeak efficiency at 50% when the energy is less than 100keV
                                     count_rate_pmp.append() 
                                 else:
                                     number_reaching_detector = (N0_pmp * radiation['intensity']/100 * radiation['efficiency'] ).n
+                                    radiation['counts per mole parent'] = number_reaching_detector
                                 count_rate_pmp.append(number_reaching_detector * dec_constant.n)
                                 if THRESHOLD_ENERGY[0]<=radiation['energy']<=THRESHOLD_ENERGY[1]:
                                     usable_counts_pmp_of[rname].append( number_reaching_detector * (1-exp(-dec_constant.n*meas_time)) )
@@ -221,7 +223,7 @@ def give_saturation_thicknesses(parents, spectra_json):
                 "total count rate per mole parent":total_count_rate_pmp,
                 "physical properties": prop_dict,
                 "usable counts per unit thickness": {rname: ary(counts)/vol_pm*AREA for rname, counts in usable_counts_pmp_of.items()},
-                "counts/(thickness*flux)": {rname: np.sum(list(contr.values()), axis=0)/vol_pm*AREA for rname, contr in thermal_contribution.items()}
+                # "counts/(thickness*flux)": {rname: np.sum(list(contr.values()), axis=0)/vol_pm*AREA for rname, contr in thermal_contribution.items()}
                 }
         else:
             print("No matching entries found for", p)
@@ -240,6 +242,8 @@ def add_min_thickness(R, rr, spectra_json, saturation_thicknesses):
                 min_thickness = min_vol/AREA
                 max_thickness = info['maximum thickness (cm)']
                 
+                mole_per_cm_thick = AREA/info['physical properties']['volume per mole (cm3)']
+                
                 count_rate_per_vol = info['total count rate per mole parent'] / vol_pm
                 count_rate_per_thickness = count_rate_per_vol * AREA
                 material = info['physical properties'][material_name]
@@ -247,22 +251,44 @@ def add_min_thickness(R, rr, spectra_json, saturation_thicknesses):
                 half_lives = [prod['measurement']['half_life'] for prod in spectra_json[reaction_name].values()]
                 if min_thickness>max_thickness:
                     print(reaction_name, "should be discarded as a larger volume than saturation count rate is required to have an appreciable effectiveness when unfolding.")
-                thickness_range_df.append([min_thickness, max_thickness, count_rate_per_thickness, material,
-                formula, info['physical properties'][density], half_lives,
-                # sum(info["usable counts per unit thickness"][reaction_name]), info["counts/(thickness*flux)"][reaction_name]])
-                sum(info["usable counts per unit thickness"][reaction_name])])
+                thickness_range_df.append([
+                    min_thickness,
+                    max_thickness,
+                    mole_per_cm_thick,
+                    count_rate_per_thickness,
+                    material,
+                    formula,
+                    info['physical properties'][density],
+                    half_lives,
+                    sum(info["usable counts per unit thickness"][reaction_name]),
+                    #info["counts/(thickness*flux)"][reaction_name]])
+                    ])
                 rname_list.append(reaction_name)
     
-    return pd.DataFrame(thickness_range_df, columns=['min thickness', 'max thickness',
-                'total count rate per cm thickness', 'material', 'formula',
-                'density value used', 'half-lives', 'sum of counts from all peaks',
-                # 'counts per cm thickness per cm-2s-1 thermal flux'], index=rname_list)
-                ], index=rname_list)
+    return pd.DataFrame(thickness_range_df, columns=[
+        'min thickness',
+        'max thickness',
+        'mole per cm thickness',
+        'total count rate per cm thickness',
+        'material',
+        'formula',
+        'density value used',
+        'half-lives',
+        'sum of usable counts from all peaks',
+        # 'counts per cm thickness per cm-2s-1 thermal flux',
+        ], index=rname_list)
 
 if __name__=="__main__":
-    R, rr, spectra_json = load_rr_R_radiation(sys.argv[-1])
+    R, rr, spectra_json = load_R_rr_radiation(sys.argv[-1])
     turn_str_back_into_Var(spectra_json)
     parents = get_all_parents(rr.index)
-    saturation_thicknesses = give_saturation_thicknesses(parents, spectra_json)
+    saturation_thicknesses = add_saturation_thicknesses(parents, spectra_json)
+    # overwrite the old version, so that the 'counts per mole parent' is added
+    spectra_file = os.path.join(sys.argv[-1], "spectra.json")
+    spec_copy = copy.deepcopy(spectra_json)
+    with open(spectra_file, mode='w', encoding='utf-8') as f:
+        json.dump(serialize(spec_copy), f)
+    
+    #save the thickness_range_df
     thickness_range_df = add_min_thickness(R, rr, spectra_json, saturation_thicknesses)
     thickness_range_df.to_csv(os.path.join(sys.argv[-1], "thicknesses.csv"), index_label='rname')

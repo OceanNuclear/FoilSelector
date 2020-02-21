@@ -48,8 +48,7 @@ class AreaTest(unittest.TestCase):
             assert self.fullrange(i)
 
     def test_scheme_1(self):
-        assert False
-        # assert self.fullrange(1)
+        assert self.fullrange(1)
         assert self.inbetween(1)
     def test_scheme_2(self):
         assert self.fullrange(2)

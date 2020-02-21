@@ -10,11 +10,12 @@ from collapx import flux_conversion, MeV, read_rnr, ReactionAndRadiation
 from flux_convert import get_integrated_apriori_value_only
 import os, sys, glob
 import copy
+from openmc.data import Tabulated1D
 
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
 SIMULATE_GAMMA_DETECTOR = True
 MAX_OUT_PHOTOPEAK_EFF = False
-IRRADIATION_DURATION = 3*3600 #seconds # Try all different ones
+IRRADIATION_DURATION = 1*3600 #seconds # Try all different ones
 TRANSIT_TIME = 10*60 # time it takes to turn off the beam, take it out, and put it on the detector.
 COUNT_TIME = 1*3600 # seconds
 USE_NATURAL_ABUNDANCE = True
@@ -159,19 +160,21 @@ def get_min_curve_contr(integrated_apriori):
     # Vice versa: the larger the value, the more lenient it becomes, asking for a lower minimum thickness later.
     return max_localization_resistance**(-2) * MIN_CURVE_CONTR_MULTIPLER # minimum contribution to the curvature of chi^2 manifold in phi space. (minimum contribution to ∇χ²)
 
-def turn_Var_into_str(data): #operable on dictionaries.
+def serialize(data): #operable on dictionaries.
     if type(data) in [uncertainties.core.Variable, uncertainties.core.AffineScalarFunc]:
         data = str(data.n) + str("+/-")+str(data.s)
     elif type(data)==dict:
         for k,v in data.items():
-            data[k] = turn_Var_into_str(v)
+            data[k] = serialize(v)
     elif type(data)==list: #then it is a class
-        data = [turn_Var_into_str(i) for i in data]
+        data = [serialize(i) for i in data]
+    elif isinstance(data, Tabulated1D):
+        data = "continuous function (removed)"
     else:
         pass
     return data
 
-def load_rr_R_radiation(working_dir):
+def load_R_rr_radiation(working_dir):
     R_file = os.path.join(working_dir, "R.csv")
     rr_file = os.path.join(working_dir, "rr.csv")
     spectra_file = os.path.join(working_dir, "spectra.json")
@@ -213,15 +216,17 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
                     dec = dec_files[d]
                 except KeyError:
                     dec = dec_files[0]
+                # dec contains the decay mode as well, which states the branching ratio and stuff.
                 all_peaks_of_this_prod = []
                 # for name in ranked_names:
                 #     reaction_and_radiation[name].decay[product_num][decay_file_version]
                 for rad, specific_spec in dec.spectra.items():
                     if rad in UNWANTED_RADITAION:
-                        print(f"Warning: unwanted radiation={rad} is found for {rname}. See {spectra_file} for its intensity")
+                        if VERBOSE:
+                            print(f"Warning: unwanted radiation={rad} is found for {rname}. See {spectra_file} for its intensity")
                     if rad=='gamma' or rad=='xray':
                         if specific_spec['continuous_flag']!='discrete':
-                            print(f"!! THIS REACTION {rname} HAS A CONTINUOUS ENERGY FLAG FOR ITS GAMMA/XRAY!")
+                            print(f"!! THIS REACTION {rname} HAS A CONTINUOUS ENERGY FLAG FOR ITS {rad}")
                         for peak in specific_spec['discrete']:
                             all_peaks_of_this_prod.append(peak)
                 all_peaks.append(all_peaks_of_this_prod)
@@ -229,7 +234,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
             #deterministic part:
             # calculate the expected number of nuclides left at the beginning of the measurement
             N_infty = rnr_file.sigma @ apriori_integrated * IRRADIATION_DURATION * N_target *CM2_BARNS_CONVERSION# unit: number of atoms # assuming flash irradiation
-            #   start to split-up the prediction by products, i.e. if there are multiple products, then we'll have to sum them.
+            # start to split-up the prediction by products, i.e. if there are multiple products, then we'll have to sum them.
             N_0, decay_correct_factors_with_unc, half_life, decay_constant = [], [], [], []
             for product in rnr_file.decay:
                 decay_correct_factors_with_unc.append( total_decay_correct(product, TRANSIT_TIME) ) # correct for flash irradiation assumption, and then for decay during transit.
@@ -256,7 +261,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
                         #which is in turn linked to the dictionary (spectra_json) where it is added.
                         
                         # if initial_count_rate.n>=MIN_COUNT_RATE_PER_MOLE_PARENT and #Stop using MIN_COUNT_PER_MOLE_PARENT because it's less useful than MIN_COUNT_PER_MOLE_PARENT
-                        if peak['energy'].n==np.clip(peak['energy'].n,*THRESHOLD_ENERGY):
+                        if peak['energy'].n==np.clip(peak['energy'].n,*THRESHOLD_ENERGY): # only consider those with well calibrated efficiency
                             counts = N_0[j] * intens.n * eff.n * integrate_count(decay_constant[j].n, COUNT_TIME) #number of gammas counted
                             if counts>MIN_COUNT_PER_MOLE_PARENT:
 
@@ -308,7 +313,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
             if len(all_products)>1: # take only the first item in each product list as the representative nuclide information dictionary.
                 if not FOCUS_MODE:
                     print(rname, "has more than 1 product, namely", [prod.nuclide['name'] for prod in all_products] )
-                    print("Assuming there is the same probability of decaying into either of these products.")
+                    print(f"Assuming there is the 100% probability of decaying into all of these products, summing up to {len(all_products)}00% probability of decay...")
                     print("Parent:", rnr_file.parent)
                     print("Daughters are as follows:")
                     for nuc in [prod.nuclide for prod in all_products]:
@@ -321,7 +326,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
 
     with open(spectra_file, mode='w', encoding='utf-8') as f:
         spec_copy= copy.deepcopy(spectra_json)
-        json.dump(turn_Var_into_str(spec_copy), f)
+        json.dump(serialize(spec_copy), f)
     print(f"The spectra for each reaction is saved at {spectra_file}")
     
     R.to_csv(R_file, index_label='rname')

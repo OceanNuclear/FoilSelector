@@ -103,12 +103,12 @@ def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori sho
     
     sigma_g = []
     if type(apriori_per_eV_func)==type(None):
-        apriori_per_eV_func = integrate_continuous_flux( np.ones(len(gs_ary)), gs_ary )
-    use_analytical_integration = True
-    if use_analytical_integration:
+        apriori_per_eV_func = openmc.data.Tabulated1d( np.ones(len(gs_ary)+1), np.hstack(gs_ary[:,0], gs_ary[-1,1]), [len(gs_ary)+1,], [1,])
+    use_analytical_integration_and_assume_flat_distribution = True
+    if use_analytical_integration_and_assume_flat_distribution:
         I = Integrate(sigma)
         for i in range(len(gs_ary)):
-            numinator = I(*gs_ary[i]) #**Change this in the future!
+            numinator = I(*gs_ary[i])
             denominator = np.diff(gs_ary[i])
             sigma_g.append(numinator/denominator)
         return ary(sigma_g).flatten().tolist()
@@ -152,7 +152,7 @@ def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori sho
 def main_collapse(apriori_func, gs_array, rdict, dec_r):
     void_reactions = [] # these are the records which are voided because they are 
     reaction_and_radiation = {}
-    print("Collapsing cross-sections using gaussian quadrature...")
+    print("Collapsing cross-sections using analytical expression...")
     for iso, mts in rdict.items():
         for mt, r in mts.items():
             rname = iso+"-"+str(mt)

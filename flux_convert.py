@@ -1,4 +1,5 @@
 from numpy import exp, cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
+from numpy import log as ln
 from matplotlib import pyplot as plt
 import pandas as pd
 import os, sys, glob
@@ -162,7 +163,7 @@ def integrate_continuous_flux(continuous_func, gs):
 
 def get_integrated_apriori_value_only(directory):
     full_file_path = join(directory, "integrated_apriori.csv")
-    integrated_apriori = pd.read_csv(full_file_path, sep="±|,", engine='python')
+    integrated_apriori = pd.read_csv(full_file_path, sep="±|,", engine='python', skipinitialspace=True)
     return integrated_apriori['value'].values
 
 def get_continuous_flux(directory):
@@ -173,7 +174,7 @@ def get_continuous_flux(directory):
 
 def get_gs_ary(directory):
     full_file_path = join(directory, "gs.csv")
-    gs = pd.read_csv(full_file_path)
+    gs = pd.read_csv(full_file_path, skipinitialspace=True)
     return gs.values
 
 def list_dir_csv(directory):
@@ -238,6 +239,10 @@ def ask_yn_question(question):
         else:
             print(f"Option {answer} not recognized; please retry:")
 
+def percentile_of(minmax_of_range, percentile=50):
+    perc = float(percentile/100)
+    return min(minmax_of_range) + perc*abs(np.diff(minmax_of_range))
+
 def scale_to_eV_interactive(gs_ary):
     gs_ary_fmt_unit_question = f"Were the group structure values \n{gs_ary}\n given in 'eV', 'keV', or 'MeV'?"
     #scale the group structure up
@@ -277,7 +282,7 @@ def ask_for_gs(directory):
         else: #neither log-spaced nor lin-spaced
             gs_min, gs_max = convert_arbitrary_gs_from_means(gs_mean)
     elif gs_fmt == 'class boundaries':
-        gs_min = get_column_interactive(directory, 'lower bounds of the energy groups')
+        gs_min = get_column_interactive(directory, 'lower bounds of the energy groups', first_time_use=True)
         gs_max = get_column_interactive(directory, 'upper bounds of the energy groups')
     gs_ary = scale_to_eV_interactive( ary([gs_min, gs_max]).T )
     return gs_ary
@@ -336,7 +341,7 @@ if __name__=='__main__':
         apriori = np.hstack([apriori, apriori[-1]])
     continuous_apriori = Tabulated1D(E_values, apriori, breakpoints=[len(apriori),], interpolation=[scheme,])
 
-    plt.plot(x:=np.linspace(*minmax(E_values)), continuous_apriori(x))
+    plt.plot(x:=np.linspace(*minmax(E_values), num=200), continuous_apriori(x))
     plt.show()
 
     print("1.4 [optional] Modifying the a priori---------------------------------------------------------------------------------------")
@@ -353,12 +358,12 @@ if __name__=='__main__':
                 offset = float(input("offset="))
                 E_values = scale_factor * E_values + offset
                 continuous_apriori = Tabulated1D(E_values, apriori, breakpoints=[len(apriori),], interpolation=[scheme,])
-                plt.plot(x:=np.linspace(*minmax(E_values)), continuous_apriori(x))
+                plt.plot(x:=np.linspace(*minmax(E_values), num=200), continuous_apriori(x))
                 plt.show()
                 can_stop = ask_yn_question("Is this satisfactory?")
                 if can_stop:
-                    print("Retrying...")
                     break
+                print("Retrying...")
             except ValueError as e:
                 print(e)
 
@@ -379,7 +384,7 @@ if __name__=='__main__':
         apriori = apriori * new_total_flux/total_flux
         continuous_apriori = Tabulated1D(E_values, apriori, breakpoints=[len(apriori)], interpolation=[scheme,])
         total_flux = Integrate(continuous_apriori)(min(E_values), max(E_values))
-        plt.plot(x:=np.linspace(*minmax(E_values)), continuous_apriori(x))
+        plt.plot(x, continuous_apriori(x))
         plt.show()
     print(f"{total_flux = }")
 
@@ -432,6 +437,16 @@ if __name__=='__main__':
             gs_array = ary([gs_min, gs_max]).T
         elif gs_source=='from file':
             gs_array = ask_for_gs(sys.argv[-1])
+    
+    fig, ax = plt.subplots()
+    ax.set_ylabel("E(eV)")
+    ax.set_xlabel("flux(per eV)")
+    ax.plot(x, continuous_apriori(x))
+    ybounds = ax.get_ybound()
+    # yheight = np.diff(ybounds[::-1])/4
+    for limits in gs_array:
+        ax.errorbar(x=np.mean(limits), y=percentile_of(ybounds, 10), xerr=np.diff(limits[::-1])/2, capsize=30, color='black')
+    plt.show()
 
     # plot the histogramic version of it once
     integrated_flux = integrate_continuous_flux(continuous_apriori, gs_array)
@@ -449,5 +464,9 @@ if __name__=='__main__':
     
     apriori_vector_df.to_csv(join(sys.argv[-1], 'integrated_apriori.csv'), index=False)
     
-    with open('continuous_apriori.pkl', 'wb') as f:
+    with open(join(sys.argv[-1],'continuous_apriori.pkl'), 'wb') as f:
         pickle.dump(continuous_apriori, f)
+    print("Preprocessing completed. The outputs are saved to:")
+    print("group structure => gs.csv,")
+    print("flux vector => integrated_flux.csv, ")
+    print("continuous apriori (a openmc.data.Tabulated1D object) => continuous apriori.csv")

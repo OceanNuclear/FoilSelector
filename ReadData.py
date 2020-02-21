@@ -44,7 +44,10 @@ def welcome_message():
     #read in each file:
     endf_data = []
     for path in file_list:
-        endf_data += openmc.data.get_evaluations(path)
+        try:
+            endf_data += openmc.data.get_evaluations(path)#works with IRDFF/IRDFFII.endf and EAF/*.endf
+        except:
+            endf_data += [openmc.data.Evaluation(path),] # works with decay/decay_2012/*.endf
     return endf_data
     
 '''
@@ -149,6 +152,7 @@ def analyse_numbers_and_overlaps(endf_data, repr_name_list):
     return incident_neutron, neutron_covar, decay, decay_covar, prod_cross_sec, overlapping_isomer_set, fully_equipped_isomer_set
 
 def get_all_mt(iso_dict):
+    print("Converting the data from openmc.data.Evaluation() objects into openmc.data.IncidentNeutron()/.Decay() objects...")
     starttime = time.time()
     # local dictionary, i.e. there are as many of these are there are isotopes.
     inc_r, dec_r = {}, {} #stores the entire reaction object
@@ -288,6 +292,7 @@ def main_read():
     #     endf_data[i]._sort_name = sorting_names[i]
         # endf_data[n].info['identifier'] gives the database ('EAF' vs not 'EAF'('IRDFF' or 'ENDF-V/B')) and MAT number.
     #Turn it into a dictionary using dict comprehension:
+    print("performing dict comprehension into iso_dict")
     iso_dict = { gnd_name:[ eval_obj for eval_obj in endf_data if eval_obj.gnd_name==gnd_name ] for gnd_name in gnd_name_list } # may lead to repeated data entry, but that's okay, because we're using a dictionary.
     
     inc_r, inc_mt, all_mts, rcomp, resonances, kTs, dec_r = get_all_mt(iso_dict) # These information is necessary for initializing the Reaction objects in the rdict.
