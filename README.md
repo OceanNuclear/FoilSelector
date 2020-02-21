@@ -28,14 +28,31 @@ Note that conversion of point-wise format into the other two formats will lead t
 ```
 python3 flux_convert.py my_directory/ # optional
 ```
-This generates three files: "continuous_apriori.pkl", "gs.csv", "integrated_apriori.csv"
-"integrated_apriori.csv" and "gs.csv" can be manually edited to change the total flux and the energy range of the flux respectively.
+This generates three files: "continuous_apriori.pkl", "gs.csv", "integrated_apriori.csv".
+The last two can be manually edited to change the total flux and the energy range of the flux respectively.
 ```
 python3 ReadData.py Library1Folder/ Library2Folder/ my_directory/
 python3 collapx.py my_directory/
 python3 convert2R.py my_directory/
 python3 thicknes.py my_directory/
 ```
+
+ReadData.py
+- requires None
+- generates "decay_radiation.pkl", "reactions.pkl", "all_mts.json"
+
+collapx.py
+- requires "decay_radiation.pkl", "reactions.pkl", "continuous_apriori.pkl"
+- generates "reaction_and_radiation.pkl"
+
+convert2R.py
+- requires "reaction_and_radiation.pkl", "photopeak_efficiency\*.csv"
+- generates "R.csv", "rr.csv", "spectra.json" (documents the response matrix, reaction rate per mole parent, and gamma spectrum per mole parent)
+
+thickness.py
+- requires "R.csv", "rr.csv", "spectra.json"
+- generates thickness.csv (documents the allowed range of thickness for each reaction/foil)
+
 Several f-strings with self-documenting expressions are used for printing information, therefore python3.8+ is required. However, one can search and replace all f-strings to side-step this problem.
 
 ## Data preparation
