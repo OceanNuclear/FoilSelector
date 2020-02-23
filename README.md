@@ -39,6 +39,7 @@ python3 thicknes.py my_directory/
 
 ReadData.py
 - requires no files in my_directory/
+- requires an endf file/files ending in ".endf" in Library\*Folder/
 - generates "decay_radiation.pkl", "reactions.pkl", "all_mts.json"
 
 collapx.py
