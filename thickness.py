@@ -104,6 +104,8 @@ def get_physical_prop(element):
         if VERBOSE:
             print("Choices for", element, "include", close_match)
         best_guess = close_match[find_closest_match(close_match, element)]
+        if element=="O": #exception for oxide, because I want to avoid dealing with Al2O399.9.
+            best_guess='MgO'
         print(f"No exact match for {element}, use closest match:{best_guess} manual correction for the dilution may be needed.")
         return physical_properties.loc[best_guess]
 

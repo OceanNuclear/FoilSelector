@@ -15,7 +15,7 @@ from openmc.data import Tabulated1D
 UNWANTED_RADITAION = ['alpha', 'n', 'sf', 'p']
 SIMULATE_GAMMA_DETECTOR = True
 MAX_OUT_PHOTOPEAK_EFF = False
-IRRADIATION_DURATION = 1*3600 #seconds # Try all different ones
+IRRADIATION_DURATION = 1 #seconds # Try all different ones
 TRANSIT_TIME = 10*60 # time it takes to turn off the beam, take it out, and put it on the detector.
 COUNT_TIME = 1*3600 # seconds
 USE_NATURAL_ABUNDANCE = True

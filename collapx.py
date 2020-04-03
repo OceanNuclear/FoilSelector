@@ -17,6 +17,8 @@ NEGLIGIBLE_FLUX_ABOVE = 1.195E7 # If the cross-section data does not extend up t
 THERMAL_E = 1/40 #eV
 VERBOSE = False # print all of the ignored nuclide
 FOCUS_MODE = True
+EXCLUDE_INCOMPLETE = False
+
 '''
 Purpose:
     Take in the variable rdict,
@@ -29,7 +31,6 @@ Exclusions:
 '''
 
 MeV = 1E6 #multiply by this to convert values in MeV to eV
-
 def save_rnr(rnr, working_dir):
     loc = os.path.join(working_dir, 'reaction_and_radiation.pkl')
     with open(loc, 'wb') as f:
@@ -139,7 +140,7 @@ def collap_xs(sigma, gs_ary, error_msg, apriori_per_eV_func=None): # apriori sho
 #             #later on, can implement rebinner inside here to change the group structure when necessary.
 #         apriori_per_eV_df = flux_conversion(flux = apriori_df.T, gs_in_eV = apriori_gs, in_fmt = apriori_in_fmt, out_fmt = 'per eV')
 #     except Exception as e:
-#         print("{0} occurred when calling main_collapse(gs_file, apriori_file),".format(repr(e)))
+#         print("{0} occurred when calling d(gs_file, apriori_file),".format(repr(e)))
 #         print("Possibly due to incorrect file format/non-existent files.")
 #         print("Make sure that they are in {0}, {1}".format(gs_file, apriori_file))
 #         print("apriori_file should be in 2 columns, with the headers 'value' and 'uncertainies',")
@@ -158,8 +159,14 @@ def main_collapse(apriori_func, gs_array, rdict, dec_r):
             rname = iso+"-"+str(mt)
             if r.products_name: #only care about isotopes that has a product name recorded.
                 #
-                if all([i in dec_r.keys() for i in r.products_name]): #only plot it if we know all of the decay products.
-                    if ALLOW_UNSTABLE_PARENT or r.parent['stable']:
+                daughter_presence = [i in dec_r.keys() for i in r.products_name]
+                if EXCLUDE_INCOMPLETE:
+                    add_condition = all(daughter_presence)
+                else:
+                    add_condition = any(daughter_presence)
+                daughter_list = [dec_r[i] for i in sorted(set(r.products_name)) if i in dec_r.keys()]
+                if add_condition: #only include it if we know all of the decay products.
+                    if ALLOW_UNSTABLE_PARENT or r.parent['stable']: #r.parent == itself
                         if not FOCUS_MODE:
                             print("collapsing", rname)
                         sigma_g = collap_xs(r.sigma, gs_array, rname, apriori_per_eV_func=apriori_func) #apriori_and_unc.values[:,0])
@@ -167,18 +174,19 @@ def main_collapse(apriori_func, gs_array, rdict, dec_r):
                         if type(sigma_g)==type(None):
                             void_reactions.append(rname)
                         else:
-                            reaction_and_radiation[rname] = ReactionAndRadiation(sigma_g, [dec_r[i] for i in sorted(set(r.products_name))], r.parent, thermal_xs)
+                            reaction_and_radiation[rname] = ReactionAndRadiation(sigma_g, daughter_list, r.parent, thermal_xs)
                     elif VERBOSE:
                         print("Ignoring ", rnmae, "as the parent is unstable.")
                     # with open("output/"+file_name, "w") as f:
                     #     f.write(np.array2string(sigma_g))
-                elif 0<sum([i in dec_r.keys() for i in r.products_name])< len(r.products_name):
-                    print("We're getting ",rname,"which has", r.products_name, "but has incomplete record")
-                    print([i in dec_r.keys() for i in r.products_name])
-                    pass
-                elif VERBOSE:
-                    print("Ignoring ", rname, "as the daughter nuclide's decay record does not exist.")
-                    # pass
+                else:
+                    if sum(daughter_presence)>0: # there are non-zero number of nuclides
+                        print("We're getting ",rname,"which has", r.products_name, "but has incomplete record and is thus excluded")
+                        print(daughter_presence)
+                        pass
+                    elif VERBOSE: # no record at all 
+                        print("Ignoring ", rname, "as no daughter nuclides'/nuclide's decay record does not exist.")
+                        # pass
             else:
                 print(rname, "Does not have reaction products listed")
     if VERBOSE:
