@@ -339,7 +339,7 @@ def R_conversion_main(reaction_and_radiation, apriori_integrated, min_curve_cont
     print(primer_sentence+"by the un-normalized apriori spectrum for {0}s, along with its measurement uncertainties, is saved in {1}".format(str(IRRADIATION_DURATION), rr_file))
     print(len(rr), "reactions are considered in total.")
     print(R_file, "contains the response matrix with the unit: cm^2")
-    print("I.e. The number of transmutation per mole parent of nuclide [k] per cm^-2 of neutron fluence (in the i^th bin) = R[k][i]")
+    print("I.e. The number of transmutation per mole parent of reaction [k] per cm^-2 of neutron fluence (in the i^th bin) = R[k][i]")
 
     return R, rr, spectra_json
 
