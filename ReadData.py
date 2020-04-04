@@ -26,9 +26,9 @@ def welcome_message():
         assert len(folder_list)>0
         #Please update your python to 3.6 or later.
         print(f"Reading from {len(folder_list)} folders,")
-        file_list = []
+        endf_file_list = []
         for folder in folder_list:
-            file_list += [os.path.join(folder, file) for file in os.listdir(folder) if file.endswith('.endf')]
+            endf_file_list += [os.path.join(folder, file) for file in os.listdir(folder) if file.endswith('.endf') or file.endswith('.asc')]
     except (IndexError, AssertionError):
         print("usage:")
         print("'python "+sys.argv[0]+" folders/ containing/ endf/ files/ in/ descending/ order/ of/ priority/ [output/]'")
@@ -40,10 +40,10 @@ def welcome_message():
         # Currently does not support reading h5 files yet, because openmc does not support reading ace/converting endf into hdf5/reading endf using enjoy yet
         sys.exit()
 
-    print(f"Found {len(file_list)} regular files ending in '.endf' ...")
+    print(f"Found {len(endf_file_list)} regular files ending in '.endf' or '.asc' ...")
     #read in each file:
     endf_data = []
-    for path in file_list:
+    for path in endf_file_list:
         try:
             endf_data += openmc.data.get_evaluations(path)#works with IRDFF/IRDFFII.endf and EAF/*.endf
         except:
@@ -86,6 +86,8 @@ class Reaction:
         # for v in openmcRlist[0].values():
         #     self.sigma = v #choose the last cross-section, i.e. the one at the highest temperature.
         self.sigma = openmcRlist[0].xs['0K']
+        if hasattr(self.sigma, 'background'):
+            self.sigma=self.sigma.background
         self.kTs = kTs_list[0]
         self.q_value = openmcRlist[0].q_value
 
@@ -107,9 +109,12 @@ class Reaction:
             if matching_section in eval_file.section.keys():
                 second_line_onwards = eval_file.section[matching_section].split("\n ")[1:]
                 for line in second_line_onwards:
-                    ZA = int(float(line.split()[0].replace("+", "e")))
-                    gnd_name = openmc.data.gnd_name( ZA//1000, ZA%1000, int(line.split()[3]) )
-                    self.products_name.append(gnd_name)
+                    try:
+                        ZA = int(float(line.split()[0].replace("+", "e")))
+                        gnd_name = openmc.data.gnd_name( ZA//1000, ZA%1000, int(line.split()[3]) )
+                        self.products_name.append(gnd_name)
+                    except:
+                        print("No products_name not found for", self.parent['zsymam'], "mt=",mt)
 
 def get_names(endf_data):
     # Sorting the gnd_names into order:
@@ -190,7 +195,7 @@ def get_all_mt(iso_dict):
 translation = {
     2:(0, 0),
     4:(0, 0),
-    11:(-1,-3),
+    11:(-1, -3),
     16:(0, -1),
     17:(0, -2),
     22:(-2, -4),

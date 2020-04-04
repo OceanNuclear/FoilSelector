@@ -270,7 +270,7 @@ def add_min_thickness(R, rr, spectra_json, saturation_thicknesses):
     return pd.DataFrame(thickness_range_df, columns=[
         'min thickness',
         'max thickness',
-        'mole per cm thickness',
+        'mole parent per cm thickness',
         'total count rate per cm thickness',
         'material',
         'formula',
