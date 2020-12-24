@@ -1,6 +1,5 @@
 # typical system/python stuff
-import os, sys
-import json
+import os, sys, json
 from collections import OrderedDict
 from tqdm import tqdm
 # typical python numerical stuff
@@ -16,7 +15,7 @@ import uncertainties
 from uncertainties.core import Variable
 # custom modules
 from flux_convert import Integrate
-from misc_library import haskey, welcome_message, HPGe_efficiency_curve_generator, MT_to_nuc_num
+from misc_library import haskey, welcome_message, detabulate, EncoderOpenMC, HPGe_efficiency_curve_generator, MT_to_nuc_num
 
 FISSION_MTS = (18, 19, 20, 21, 22, 38)
 AMBIGUOUS_MT = (1, 3, 5, 18, 27, 101, 201, 202, 203, 204, 205, 206, 207, 649)
@@ -36,10 +35,10 @@ def extract_decay(dec_file):
     """
     half_life = Variable(np.clip(dec_file.half_life.n, 1E-23, None), dec_file.half_life.s) # increase the half-life to a non-zero value.
     decay_constant = ln(2)/(half_life)
-    modes = []
+    modes = {}
     for mode in dec_file.modes:
-        modes.append(dict(daughter=mode.daughter, branching_ratio=mode.branching_ratio))
-    return dict(decay_constant=decay_constant, modes=modes, spectra=dec_file.spectra)
+        modes[mode.daughter] = mode.branching_ratio
+    return dict(decay_constant=decay_constant, branching_ratio=modes, spectra=dec_file.spectra)
 
 def condense_spectrum(dec_file):
     """
@@ -58,9 +57,12 @@ def condense_spectrum(dec_file):
         norm_factor = dec_file['spectra']['xray']['discrete_normalization']
         for xray_line in dec_file['spectra']['xray']['discrete']:
             if np.clip(xray_line['energy'].n, *gamma_E)==xray_line['energy'].n:
-                count += photopeak_eff_curve(xray_line['energy']) * xray_line['intensity']/100 * norm_factor
+                additional_counts = photopeak_eff_curve(xray_line['energy']) * xray_line['intensity']/100 * norm_factor
+                if not additional_counts.s<=additional_counts.n:
+                    additional_counts = Variable(additional_counts.n, additional_counts.n) # clipping the uncertainty so that std never exceed the mean. This takes care of the nan's too.
+                count += additional_counts
     del dec_file['spectra']
-    dec_file['countable_photons'] = count #countable photons per parent
+    dec_file['countable_photons'] = count #countable photons per decay of this isotope
     return
 
 def deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, mt):
@@ -102,31 +104,6 @@ def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True
             xs_list.append(detabulate(partial_xs) if (not tabulated) else partial_xs)
     return appending_name_list, xs_list
 
-def detabulate(tabulated_object):
-    """
-    Convert a openmc.data.
-    """
-    x = tabulated_object.x.tolist()
-    y = tabulated_object.y.tolist()
-    interpolation = []
-    for ind in range(1,len(x)):
-        mask = ind<tabulated_object.breakpoints # may need a little change because interpolation is supposed to have length = len(x)-1
-        interpolation.append( tabulated_object.interpolation[mask][0] ) # choose the leftmost section that has energy < the next breakpoint, and add that section's corresponding interp scheme.
-    return dict(x=x, y=y, interpolation=interpolation)
-
-def serialize_dict(mixed_object):
-    if isinstance(mixed_object, dict):
-        for key, val in mixed_object.items():
-            mixed_object[key] = serialize_dict(val)
-    elif isinstance(mixed_object, list):
-        for ind, item in enumerate(mixed_object):
-            mixed_object[ind] = serialize_dict(item)
-    elif isinstance(mixed_object, uncertainties.core.AffineScalarFunc):
-        mixed_object = str(mixed_object) # rewrite into str format
-    else: # can't break it down, and probably is a scalar.
-        pass
-    return mixed_object
-
 def clean_up_missing_records(xs_dict, decay_dict):
     """
     If there are entries in the xs_dict that gives a very unstable product (e.g. Ag_m22) as a primary product:
@@ -146,6 +123,9 @@ def clean_up_missing_records(xs_dict, decay_dict):
                 else:
                     xs_dict[new_name] = xs_dict[parent_product_mt] # create entirely new xs entry
                 del xs_dict[parent_product_mt] # remove the old, unstable parent entry.
+            else:
+                print("Non existant decay product found! {} is an expected product of {}-{}, but is not present in decay_dict.".foramt(product, parent, long_mt))
+                del xs_dict[parent_product_mt]
 
 def collapse_xs(xs_dict, gs_ary):
     """
@@ -169,7 +149,7 @@ if __name__=='__main__':
     print(f"Loaded {len(endf_file_list)} different mateiral files,\n")
 
     # First compile the decay records
-    print("Compiling the decay_dict...")
+    print("\nCompiling the decay_dict...")
     decay_dict = OrderedDict()
     for file in tqdm(endf_file_list):
         if repr(file).strip('<>').startswith('Radio'): # applicable to materials with (mf, mt) = (8, 457) file section
@@ -177,12 +157,19 @@ if __name__=='__main__':
             decay_dict[str(dec_f.nuclide['atomic_number']).zfill(3)+dec_f.nuclide['name']] = extract_decay(dec_f)
     decay_dict = sort_and_trim_ordered_dict(decay_dict) # reorder it so that it conforms to the 
     
-    print("Condensing each decay spectrum...")
+    # Save said decay records
+    with open(os.path.join(sys.argv[-1], FULL_DECAY_INFO_FILE:='decay_radiation.json'), 'w') as f:
+        print("\nSaving the decay spectra as {} ...".format(FULL_DECAY_INFO_FILE))
+        json.dump(decay_dict, f, cls=EncoderOpenMC)
+    sys.exit()
+
+    # turn decay records into number of counts
+    print("\nCondensing each decay spectrum...")
     for name, dec_file in tqdm(decay_dict.items()):
         condense_spectrum(dec_file)
-
+        
     # Then compile the Incident-neutron records
-    print("Compiling the raw cross-section dictionary ...")
+    print("\nCompiling the raw cross-section dictionary ...")
     xs_dict = OrderedDict()
     for file in tqdm(endf_file_list):
         if repr(file).strip('<>').startswith('Incident-neutron'):
@@ -205,6 +192,7 @@ if __name__=='__main__':
     xs_dict = sort_and_trim_ordered_dict(xs_dict)
 
 
+    print("\nCollapsing the cross-section to the group structure specified in 'gs.csv' and saving it as 'response.csv' ...")
     sigma_df = collapse_xs(xs_dict, gs)
     if SORT_BY_REACTION_RATE:
       sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]
@@ -212,9 +200,10 @@ if __name__=='__main__':
     # saves the number of radionuclide produced
     #   per (neutron cm^-2) of fluence flash-irradiated in that given bin.
 
-    with open(os.path.join(sys.argv[-1], 'decay_records.json'), 'w') as f:
-        decay_dict = serialize_dict(decay_dict)
-        json.dump(decay_dict, f)
+    
+    with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'w') as f:
+        print("\nSaving the condensed decay information as {} ...".format(CONDENSED_DECAY_INFO_FILE))
+        json.dump(decay_dict, f, cls=EncoderOpenMC)
 
     """
     See _check_stuff.py for the to-do list. 2020-12-06 15:50:18

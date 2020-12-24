@@ -11,7 +11,7 @@ import json
 import sys, os
 import pandas as pd
 from collections import namedtuple, OrderedDict
-from misc_library import haskey
+from misc_library import haskey, unserialize_dict
 import math
 
 def kahan_sum(a, axis=0):
@@ -29,56 +29,6 @@ def kahan_sum(a, axis=0):
         c = (t - s) - y
     return t
 
-def incremental_sum(unsorted_list):
-    """
-    Calculate the sum
-    unsorted_list : list
-    """
-    order = np.argsort([abs(i) for i in unsorted_list])
-    return _sum(*ary(unsorted_list)[order])
-
-def _sum(*list_of_scalars):
-    if len(list_of_scalars)>1:
-        return _sum(list_of_scalars[0]+list_of_scalars[1], *list_of_scalars[2:])
-    elif len(list_of_scalars)==1:
-        return list_of_scalars[0]
-    else:
-        return 0.0
-
-def _product(*list_of_scalars):
-    if len(list_of_scalars)>1:
-        return _product(list_of_scalars[0]*list_of_scalars[1], *list_of_scalars[2:])
-    elif len(list_of_scalars)==1:
-        return list_of_scalars[0]
-    else:
-        return 1.0
-
-def unserialize_dict(mixed_object):
-    """
-    Turn the string representation of the uncertainties back into uncertainties.core.Variable 's.
-    """
-    if isinstance(mixed_object, dict):
-        for key, val in mixed_object.items():
-            mixed_object[key] = unserialize_dict(val)
-    elif isinstance(mixed_object, list):
-        for ind, item in enumerate(mixed_object):
-            mixed_object[ind] = unserialize_dict(item)
-    elif isinstance(mixed_object, str):
-        if '+/-' in mixed_object: # is an uncertainties.core.Variable object
-            mixed_object.split
-            if ')' in mixed_object:
-                multiplier = float('1'+mixed_object.split(')')[1])
-                mixed_object_stripped = mixed_object.split(')')[0].strip('(')
-            else:
-                multiplier = 1.0
-                mixed_object_stripped = mixed_object
-            mixed_object = Variable(*[float(i)*multiplier for i in mixed_object_stripped.split('+/-')])
-        else:
-            pass # just a normal string
-    else: # unknown type
-        pass
-    return mixed_object
-
 def build_decay_chain(decay_parent, decay_dict, decay_constant_threshold=1E-23):
     """
     Build the entire decay chain for a given starting isotope.
@@ -89,24 +39,28 @@ def build_decay_chain(decay_parent, decay_dict, decay_constant_threshold=1E-23):
         the entire decay_dict containing all of the that there is.
     """
     if not haskey(decay_dict, decay_parent):
-        return_dict = {'name':decay_parent, 'decay_constant':Variable(0.0,0.0), 'countable_photons':Variable(0.0,0.0)}
-        return return_dict
-    elif decay_dict[decay_parent]['decay_constant']<=decay_constant_threshold:
+        # decay_dict does not contain any decay data record about the specified isotope (decay_parent), meaning it is (possibly) stable.
+        return_dict = {'name':decay_parent, 'decay_constant':Variable(0.0,0.0), 'countable_photons':Variable(0.0,0.0), 'modes':{}}
+    else: # decay_dict contains the specified decay_parent
         parent = decay_dict[decay_parent]
-        return_dict = {'name':decay_parent, 'decay_constant':parent['decay_constant'], 'countable_photons':parent['countable_photons']}
-        return return_dict
-    else:
-        parent = decay_dict[decay_parent]
-        return_dict = {'name':decay_parent, 'decay_constant':parent['decay_constant'], 'countable_photons':parent['countable_photons']}
-        return_dict['modes'] = [{'daughter':build_decay_chain(mode['daughter'], decay_dict), 'branching_ratio':mode['branching_ratio']} for mode in parent['modes'] if mode['daughter']!=decay_parent] # prevent infinite recursion
-        return return_dict
+        return_dict = {'name':decay_parent, 'decay_constant':parent['decay_constant'], 'countable_photons':parent['countable_photons']} # countable_photons per decay of this isotope
+        if decay_dict[decay_parent]['decay_constant']<=decay_constant_threshold:
+            # if this isotope is rather stable.
+            return return_dict
+        else:
+            return_dict['modes'] = []
+            for name, branching_ratio in decay_dict[decay_parent]['branching_ratio'].items():
+                if name!=decay_parent:
+                    return_dict['modes'].append( {'daughter': build_decay_chain(name, decay_dict), 'branching_ratio': branching_ratio} )
+    return return_dict
 
 class IsotopeDecay(namedtuple('IsotopeDecay', ['names', 'branching_ratios', 'decay_constants', 'countable_photons'])):
     """
-    Quickly bodged together class that contains 3 attributes:
+    Quickly bodged together class that contains 4 attributes:
         names as a list,
         branching_ratios as a list,
-        decay_constants as a list.
+        decay_constants as a list,
+        countable_photons of the last isotope as a uncertainties.core.AffineFunc object (or a scalar).
     Made so that the __add__ method would behave differently than a normal tuple.
     """
     def __add__(self, subordinate):
@@ -123,7 +77,7 @@ def linearize_decay_chain(decay_file):
                             [decay_file['decay_constant']],
                             decay_file['countable_photons'])
     all_chains = [self_decay]
-    if haskey(decay_file, 'modes'):
+    if haskey(decay_file, 'modes'): # expand the decay modes if there are any.
         for mode in decay_file['modes']:
             this_branch = linearize_decay_chain(mode['daughter']) # note that this is a list, so we need to unpack it.
             for subbranch in this_branch:
@@ -140,11 +94,12 @@ def Bateman_equation_generator(branching_ratios, decay_constants, decay_constant
         End of irradiation period.
         Irradiation schedule = from 0 to a, 
         with rrdiation power = 1/a, so that total amount of irradiation = 1.0.
+    Reduce decay_constant_threshold when calculating on very short timescales.
     """
     # assert len(branching_ratios)==len(decay_constants), "Both are lists of parameters describing the entire pathway of the decay cahin up to that isotope."
     if any([i<=decay_constant_threshold for i in decay_constants]):
         return lambda x: x-x # catch the cases where there are zeros in the decay_rates
-    premultiplying_factor = _product(*decay_constants[:-1])*_product(*branching_ratios[1:])
+    premultiplying_factor = np.product(decay_constants[:-1])*np.product(branching_ratios[1:])
     inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)
     inverted_matrix += np.diag(np.ones(len(decay_constants)))
     final_matrix = 1/inverted_matrix
@@ -161,7 +116,7 @@ def Bateman_equation_generator(branching_ratios, decay_constants, decay_constant
 def Bateman_convolved_generator(branching_ratios, decay_constants, a, decay_constant_threshold=1E-23):
     if any([i<=decay_constant_threshold for i in decay_constants]):
         return lambda x: x-x # catch the cases where there are zeros in the decay rates.
-    premultiplying_factor = _product(*decay_constants[:-1])*_product(*branching_ratios[1:])/a
+    premultiplying_factor = np.product(decay_constants[:-1])*np.product(branching_ratios[1:])/a
     inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)
     inverted_matrix += np.diag(decay_constants)
     final_matrix = 1/inverted_matrix
@@ -172,7 +127,7 @@ def Bateman_convolved_generator(branching_ratios, decay_constants, a, decay_cons
         generated using irradiation duration a={} seconds
         """.format(a)
         vector_uncollapsed = ary([+uncertainties.unumpy.exp(-ary([l*np.clip(t-a,0, None) for l in decay_constants])), -uncertainties.unumpy.exp(-ary([l*np.clip(t,0, None) for l in decay_constants]))], dtype=object)
-        vector = kahan_sum(vector_uncollapsed, axis=0)
+        vector = np.sum(vector_uncollapsed, axis=0)
         return premultiplying_factor*(multiplying_factors@vector)
     return calculate_convoled_population
 
@@ -189,6 +144,7 @@ def Bateman_integrated_population(branching_ratios, decay_constants, a, b, c, DE
     c : scalar
         End of gamma measurement time.
     The initial population is always assumed as 1.
+    Reduce decay_constant_threshold when calculating on very short timescales.
     """
     # assert len(branching_ratios)==len(decay_constants), "Both are lists of parameters describing the entire pathway of the decay chain up to that isotope."
     if any([i<=decay_constant_threshold for i in decay_constants]):
@@ -196,7 +152,7 @@ def Bateman_integrated_population(branching_ratios, decay_constants, a, b, c, DE
         return Variable(0.0, 0.0) # catch the cases where there are zeros in the decay_rates
             # in practice this should only happen for chains with stable parents, i.e.
             # this if-condition would only be used if the decay chain is of length==1.    
-    premultiplying_factor = _product(*decay_constants[:-1])*_product(*branching_ratios[1:])/a
+    premultiplying_factor = np.product(decay_constants[:-1])*np.product(branching_ratios[1:])/a
     inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)[0]
     inverted_matrix += np.diag(decay_constants)**2
     final_matrix = 1/inverted_matrix
@@ -205,7 +161,7 @@ def Bateman_integrated_population(branching_ratios, decay_constants, a, b, c, DE
                     -uncertainties.unumpy.exp(-ary(decay_constants)*(c-a)),
                     -uncertainties.unumpy.exp(-ary(decay_constants)*b),
                     +uncertainties.unumpy.exp(-ary(decay_constants)*(b-a),)], dtype=object)
-    vector = kahan_sum(vector_uncollapsed, axis=0)
+    vector = np.sum(vector_uncollapsed, axis=0)
     if DEBUG:
         print(#inverted_matrix, '\n', final_matrix, '\n',
         'multiplying_factors=\n', multiplying_factors,
@@ -215,17 +171,81 @@ def Bateman_integrated_population(branching_ratios, decay_constants, a, b, c, DE
         print("Vector right= \n", uncertainties.unumpy.exp(-ary(decay_constants)*(c-a)) - uncertainties.unumpy.exp(-ary(decay_constants)*c))
     return premultiplying_factor * (multiplying_factors @ vector)
 
+def Bateman_num_decays_factorized(branching_ratios, decay_constants, a, b, c, DEBUG=False, decay_constant_threshold=1E-23):
+    """
+    Calculates the amount of decay radiation measured using the Bateman equation.
+    branching_ratio : array
+        the list of branching ratios of all its parents, and then itself, in the order that the decay chain was created.
+    a : scalar
+        End of irradiation period.
+        Irrdiation power = 1/a, so that total amount of irradiation = 1.
+    b : scalar
+        Start of gamma measurement time.
+    c : scalar
+        End of gamma measurement time.
+    The initial population is always assumed as 1.
+    Reduce decay_constant_threshold when calculating on very short timescales.
+    """
+    # assert len(branching_ratios)==len(decay_constants), "Both are lists of parameters describing the entire pathway of the decay chain up to that isotope."
+    if any([i<=decay_constant_threshold for i in decay_constants]):
+        if DEBUG: print(f"{decay_constants=} \ntoo small, escaped.")
+        return Variable(0.0, 0.0) # catch the cases where there are zeros in the decay_rates
+            # in practice this should only happen for chains with stable parents, i.e.
+            # this if-condition would only be used if the decay chain is of length==1.    
+    premultiplying_factor = np.product(decay_constants[:])*np.product(branching_ratios[1:])/a
+    inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)[0]
+    # inverted_matrix += np.diag(decay_constants)**2
+    inverted_matrix += np.diag(np.ones(len(decay_constants)))
+    final_matrix = 1/inverted_matrix
+    multiplying_factors = np.product(final_matrix, axis=-1)
+    try:
+        vector_uncollapsed = ary([1/ary(decay_constants)**2
+                        *uncertainties.unumpy.expm1(ary(decay_constants)*a)
+                        *uncertainties.unumpy.expm1(ary(decay_constants)*(c-b))
+                        *uncertainties.unumpy.exp(-ary(decay_constants)*c) ], dtype=object)
+    except OverflowError:
+        # remove the element that causes such an error from the chain, and recompute
+        decay_constants_copy = decay_constants.copy()
+        for ind, l in list(enumerate(decay_constants))[::-1]:
+            try:
+                ary([1/ary(l)**2
+                        *uncertainties.unumpy.expm1(ary(l)*a)
+                        *uncertainties.unumpy.expm1(ary(l)*(c-b))
+                        *uncertainties.unumpy.exp(-ary(l)*c) ])
+            except OverflowError: # catch all cases and pop them out of the list
+                decay_constants_copy.pop(ind)
+
+        return Bateman_num_decays_factorized(branching_ratios, decay_constants_copy, a, b, c, DEBUG, decay_constant_threshold)
+    vector = np.sum(vector_uncollapsed, axis=0)
+    if DEBUG:
+        print(#inverted_matrix, '\n', final_matrix, '\n',
+        'multiplying_factors=\n', multiplying_factors,
+        #'\n--------\nvector=\n', vector,
+        )
+        try:
+            print("Convolution term = \n", uncertainties.unumpy.expm1(ary(decay_constants)*a)/ary(decay_constants))
+            print("measurement (integration) term\n", uncertainties.unumpy.expm1(ary(decay_constants)*(c-b))/ary(decay_constants))
+            print("end of measurement term\n", uncertainties.unumpy.exp(-ary(decay_constants)*c))
+        except:
+            print("Overflow error")
+    return premultiplying_factor * (multiplying_factors @ vector)
+
+def check_differences(decay_constants):
+    difference_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)[0]
+    return abs(difference_matrix)[np.triu_indices(len(decay_constants), 1)]
+
 # PARAMETERS
-IRRADIATION_DURATION = 3600
+IRRADIATION_DURATION = 3600 # spread the irradiation power over the entire course of this length
 TRANSIT_DURATION = 5*60
 MEASUREMENT_DURATION = 3600
 
+_barn = 1E-24
 if __name__=='__main__':
     assert os.path.exists(os.path.join(sys.argv[-1], 'integrated_apriori.csv')), "Output directory must already have integrated_apriori.csv for calculating the radionuclide populations."
     apriori = pd.read_csv(os.path.join(sys.argv[-1], 'integrated_apriori.csv'))['value'].values # integrated_apriori.csv is a csv with header = value and number of rows = len(gs); no index.
-    # print("Reading integrated_apriori.csv as the flux, i.e. total number of neutrons/cm^2/eV/s, averaged over the IRRADIATION_DURATION = {}".format(IRRADIATION_DURATION))
+    print("Reading integrated_apriori.csv as the fluence, i.e. total number of neutrons/cm^2/eV, summed over the IRRADIATION_DURATION = {}".format(IRRADIATION_DURATION))
 
-    with open(os.path.join(sys.argv[-1], 'decay_records.json'), 'r') as f:
+    with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'r') as f:
         decay_dict = json.load(f)
         decay_dict = unserialize_dict(decay_dict)
     sigma_df = pd.read_csv(os.path.join(sys.argv[-1], 'response.csv'), index_col=[0])
@@ -234,30 +254,48 @@ if __name__=='__main__':
     for parent_product_mt in sigma_df.index:
         product = parent_product_mt.split('-')[1]
         detected_counts_per_parent_material_nuclide[parent_product_mt] = [{
-                    'pathway': '-'.join(chain.names),
-                    'counts':Bateman_integrated_population(chain.branching_ratios, chain.decay_constants,
+                    'pathway': '-'.join(subchain.names),
+                    'counts':Bateman_num_decays_factorized(subchain.branching_ratios, subchain.decay_constants,
                             IRRADIATION_DURATION,
                             IRRADIATION_DURATION+TRANSIT_DURATION,
                             IRRADIATION_DURATION+TRANSIT_DURATION+MEASUREMENT_DURATION,
                             # DEBUG=True,
-                            )*chain.countable_photons*chain.decay_constants[-1], # question: do I have to multiply by that at all?
-                    } for chain in linearize_decay_chain(build_decay_chain(product, decay_dict))]
+                            )*subchain.countable_photons,
+                            # (# of photons detected per nuclide n decayed) = (# of photons detected per decay of nuclide n) * lambda_n * \int(population)dT
+                    } for subchain in linearize_decay_chain(build_decay_chain(product, decay_dict))]
     """
-    # print all negative cases
-    debug_dict, not_debug_dict = {}, {}
-    for reaction in detected_counts_per_parent_material_nuclide.values():
+    # get all negative cases and >1 cases for debugging purposes
+    debug_dict_negative, debug_dict_too_big, not_debug_dict = {}, {}, {}
+    for parent_product_mt, reaction in detected_counts_per_parent_material_nuclide.items():
         for path in reaction:
             # if len(path['pathway'].split('-'))==2:
             if path['counts']<=0:
                 # print(path['counts'], '\t\t', path['pathway'])
-                debug_dict[path['pathway']] = path['counts']
+                debug_dict_negative[path['pathway']] = path['counts']
+            elif path['counts']>0.1:
+                debug_dict_too_big[path['pathway']] = path['counts']
             else:
                 not_debug_dict[path['pathway']] = path['counts']
-    sort_order = np.argsort(list(debug_dict.values()))
-    debug_dict = OrderedDict([(key, val) for (key, val) in ary(list(debug_dict.items()))[sort_order]])
+            
+    debug_dict_negative = OrderedDict([(key, val) for (key, val) in ary(list(debug_dict_negative.items()))[np.argsort(list(debug_dict_negative.values()))]])
+    debug_dict_too_big = OrderedDict([(key, val) for (key, val) in ary(list(debug_dict_too_big.items()))[np.argsort(list(debug_dict_too_big.values()))]])
+    not_debug_dict = OrderedDict([(key, val) for (key, val) in ary(list(not_debug_dict.items()))[np.argsort(list(not_debug_dict.values()))]])
+    
+    differences, min_diff = {}, {}
+    for parent_product_mt in sigma_df.index:
+        product = parent_product_mt.split('-')[1]
+        for subchain in linearize_decay_chain(build_decay_chain(product, decay_dict)):
+            subchain_name = '-'.join(subchain.names)
+            differences[subchain_name] = check_differences(subchain.decay_constants)
+            if len(differences[subchain_name])>0:
+                min_diff[subchain_name] = min(differences[subchain_name])
+    min_diff = OrderedDict([(key, val) for (key, val) in ary(list(min_diff.items()))[np.argsort(list(min_diff.values()))]])
+
     """
-    population = pd.DataFrame({'production rate':sigma_df.values @ apriori}, index=sigma_df.index)
-    population['total counts per atom per second irradiation'] = [sum([path['counts'] for path in detected_counts_per_parent_material_nuclide[i]]) for i in sigma_df.index]
-    population['final counts accumulated'] = population['total counts per atom per second irradiation'] * population['production rate']
-    population.sort_values('final counts accumulated', inplace=True, ascending=False)
+    # """
+    population = pd.DataFrame({'production rate of primary product per parent atom':(sigma_df.values*_barn) @ apriori}, index=sigma_df.index)
+    population['total counts per primary product'] = [sum([path['counts'] for path in detected_counts_per_parent_material_nuclide[i]]) for i in sigma_df.index]
+    population['final counts accumulated per parent atom'] = population['total counts per primary product'] * population['production rate of primary product per parent atom']
+    population.sort_values('final counts accumulated per parent atom', inplace=True, ascending=False)
     population.to_csv(os.path.join(sys.argv[-1], 'raw_counts_per_atom.csv'), index_label='rname')
+    # """
