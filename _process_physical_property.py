@@ -18,7 +18,7 @@ Module to algorithmically generate information about the the number densities an
 of the material.
 """
 
-ADD_ELEMENTAL_FRACTION = False
+ADD_ELEMENTAL_FRACTION = True
 ADD_ISOTOPIC_FRACTION = True
 PHYSICAL_PROP_FILE = "goodfellow_physicalprop.csv"
 if __name__=='__main__':

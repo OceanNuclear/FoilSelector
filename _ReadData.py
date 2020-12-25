@@ -15,7 +15,7 @@ import uncertainties
 from uncertainties.core import Variable
 # custom modules
 from flux_convert import Integrate
-from misc_library import haskey, welcome_message, detabulate, EncoderOpenMC, HPGe_efficiency_curve_generator, MT_to_nuc_num
+from misc_library import haskey, load_endf_directories, detabulate, EncoderOpenMC, HPGe_efficiency_curve_generator, MT_to_nuc_num
 
 FISSION_MTS = (18, 19, 20, 21, 22, 38)
 AMBIGUOUS_MT = (1, 3, 5, 18, 27, 101, 201, 202, 203, 204, 205, 206, 207, 649)
@@ -145,7 +145,7 @@ if __name__=='__main__':
     if (SORT_BY_REACTION_RATE:=True):
         assert os.path.exists(os.path.join(sys.argv[-1], 'integrated_apriori.csv')), "Output directory must already have integrated_apriori.csv in order to sort the response.csv in descending order of expected-radionuclide-population later on."
         apriori = pd.read_csv(os.path.join(sys.argv[-1], 'integrated_apriori.csv'))['value'].values
-    endf_file_list = welcome_message()
+    endf_file_list = load_endf_directories(sys.argv[1:])
     print(f"Loaded {len(endf_file_list)} different mateiral files,\n")
 
     # First compile the decay records
@@ -197,8 +197,7 @@ if __name__=='__main__':
     if SORT_BY_REACTION_RATE:
       sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]
     sigma_df.to_csv(os.path.join(sys.argv[-1], 'response.csv'))
-    # saves the number of radionuclide produced
-    #   per (neutron cm^-2) of fluence flash-irradiated in that given bin.
+    # saves the number of radionuclide produced per (neutron cm^-2) of fluence flash-irradiated in that given bin.
 
     
     with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'w') as f:

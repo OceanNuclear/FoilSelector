@@ -12,22 +12,13 @@ import sys, os
 import pandas as pd
 from collections import namedtuple, OrderedDict
 from misc_library import haskey, unserialize_dict
-import math
-
-def kahan_sum(a, axis=0):
-    """
-    Carefully add together sum to avoid floating point precision problem.
-    Retrieved (and then modified) from
-    https://github.com/numpy/numpy/issues/8786
-    """
-    s = np.zeros(a.shape[:axis] + a.shape[axis+1:])
-    c = np.zeros(s.shape)
-    for i in range(a.shape[axis]):
-        # http://stackoverflow.com/42817610/353337
-        y = a[(slice(None),) * axis + (i,)] - c
-        t = s + y
-        c = (t - s) - y
-    return t
+from misc_library import (  get_fraction,
+                            pick_material,
+                            get_elemental_fractions,
+                            extract_elem_from_string,
+                            get_natural_average_atomic_mass, 
+                            convert_elemental_to_isotopic_fractions,
+                            get_average_atomic_mass_from_isotopic_fractions)
 
 def build_decay_chain(decay_parent, decay_dict, decay_constant_threshold=1E-23):
     """
@@ -84,92 +75,6 @@ def linearize_decay_chain(decay_file):
                 subbranch.branching_ratios[0] = mode['branching_ratio']
                 all_chains.append(self_decay+subbranch)
     return all_chains # returns a list
-
-def Bateman_equation_generator(branching_ratios, decay_constants, decay_constant_threshold=1E-23):
-    """
-    Calculates the radioisotope population at the end of the chain specified.
-    branching_ratio : array
-        the list of branching ratios of all its parents, and then itself, in the order that the decay chain was created.
-    a : scalar
-        End of irradiation period.
-        Irradiation schedule = from 0 to a, 
-        with rrdiation power = 1/a, so that total amount of irradiation = 1.0.
-    Reduce decay_constant_threshold when calculating on very short timescales.
-    """
-    # assert len(branching_ratios)==len(decay_constants), "Both are lists of parameters describing the entire pathway of the decay cahin up to that isotope."
-    if any([i<=decay_constant_threshold for i in decay_constants]):
-        return lambda x: x-x # catch the cases where there are zeros in the decay_rates
-    premultiplying_factor = np.product(decay_constants[:-1])*np.product(branching_ratios[1:])
-    inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)
-    inverted_matrix += np.diag(np.ones(len(decay_constants)))
-    final_matrix = 1/inverted_matrix
-    multiplying_factors = np.product(final_matrix, axis=-1)
-    def calculate_population(t):
-        vector = (uncertainties.unumpy.exp(-ary(decay_constants)*max(0,t))
-                # -uncertainties.unumpy.exp(-ary(decay_constants)*(c-a))
-                # -uncertainties.unumpy.exp(-ary(decay_constants)*b)
-                # +uncertainties.unumpy.exp(-ary(decay_constants)*(b-a))
-                )
-        return premultiplying_factor * (multiplying_factors @ vector)
-    return calculate_population
-
-def Bateman_convolved_generator(branching_ratios, decay_constants, a, decay_constant_threshold=1E-23):
-    if any([i<=decay_constant_threshold for i in decay_constants]):
-        return lambda x: x-x # catch the cases where there are zeros in the decay rates.
-    premultiplying_factor = np.product(decay_constants[:-1])*np.product(branching_ratios[1:])/a
-    inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)
-    inverted_matrix += np.diag(decay_constants)
-    final_matrix = 1/inverted_matrix
-    multiplying_factors = np.product(final_matrix, axis=-1)
-    def calculate_convoled_population(t):
-        """
-        Calculates the population at any given time t when a non-flash irradiation schedule is used,
-        generated using irradiation duration a={} seconds
-        """.format(a)
-        vector_uncollapsed = ary([+uncertainties.unumpy.exp(-ary([l*np.clip(t-a,0, None) for l in decay_constants])), -uncertainties.unumpy.exp(-ary([l*np.clip(t,0, None) for l in decay_constants]))], dtype=object)
-        vector = np.sum(vector_uncollapsed, axis=0)
-        return premultiplying_factor*(multiplying_factors@vector)
-    return calculate_convoled_population
-
-def Bateman_integrated_population(branching_ratios, decay_constants, a, b, c, DEBUG=False, decay_constant_threshold=1E-23):
-    """
-    Calculates the amount of decay radiation measured using the Bateman equation.
-    branching_ratio : array
-        the list of branching ratios of all its parents, and then itself, in the order that the decay chain was created.
-    a : scalar
-        End of irradiation period.
-        Irrdiation power = 1/a, so that total amount of irradiation = 1.
-    b : scalar
-        Start of gamma measurement time.
-    c : scalar
-        End of gamma measurement time.
-    The initial population is always assumed as 1.
-    Reduce decay_constant_threshold when calculating on very short timescales.
-    """
-    # assert len(branching_ratios)==len(decay_constants), "Both are lists of parameters describing the entire pathway of the decay chain up to that isotope."
-    if any([i<=decay_constant_threshold for i in decay_constants]):
-        if DEBUG: print(f"{decay_constants=} \ntoo small, escaped.")
-        return Variable(0.0, 0.0) # catch the cases where there are zeros in the decay_rates
-            # in practice this should only happen for chains with stable parents, i.e.
-            # this if-condition would only be used if the decay chain is of length==1.    
-    premultiplying_factor = np.product(decay_constants[:-1])*np.product(branching_ratios[1:])/a
-    inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)[0]
-    inverted_matrix += np.diag(decay_constants)**2
-    final_matrix = 1/inverted_matrix
-    multiplying_factors = np.product(final_matrix, axis=-1)
-    vector_uncollapsed = ary([  +uncertainties.unumpy.exp(-ary(decay_constants)*c),
-                    -uncertainties.unumpy.exp(-ary(decay_constants)*(c-a)),
-                    -uncertainties.unumpy.exp(-ary(decay_constants)*b),
-                    +uncertainties.unumpy.exp(-ary(decay_constants)*(b-a),)], dtype=object)
-    vector = np.sum(vector_uncollapsed, axis=0)
-    if DEBUG:
-        print(#inverted_matrix, '\n', final_matrix, '\n',
-        'multiplying_factors=\n', multiplying_factors,
-        #'\n--------\nvector=\n', vector,
-        )
-        print("Vector left = \n", uncertainties.unumpy.exp(-ary(decay_constants)*(b-a)) - uncertainties.unumpy.exp(-ary(decay_constants)*b))
-        print("Vector right= \n", uncertainties.unumpy.exp(-ary(decay_constants)*(c-a)) - uncertainties.unumpy.exp(-ary(decay_constants)*c))
-    return premultiplying_factor * (multiplying_factors @ vector)
 
 def Bateman_num_decays_factorized(branching_ratios, decay_constants, a, b, c, DEBUG=False, decay_constant_threshold=1E-23):
     """
@@ -238,14 +143,24 @@ def check_differences(decay_constants):
 IRRADIATION_DURATION = 3600 # spread the irradiation power over the entire course of this length
 TRANSIT_DURATION = 5*60
 MEASUREMENT_DURATION = 3600
+FOIL_AREA = 4 #cm^2
+ENRICH_TO_100_PERCENT = False # allowing enrichment means 100% of that element being made of the specified isotope only
 
-_barn = 1E-24
+BARN = 1E-24
+MM_CM= 0.1
+
+PHYSICAL_PROP_FILE = "elemental_frac_isotopic_frac_physical_property.csv"
+CONDENSED_DECAY_INFO_FILE = 'decay_counts.json'
+
 if __name__=='__main__':
     assert os.path.exists(os.path.join(sys.argv[-1], 'integrated_apriori.csv')), "Output directory must already have integrated_apriori.csv for calculating the radionuclide populations."
+    assert os.path.exists(PHYSICAL_PROP_FILE), "Expected physical property file at ./{}".format(os.path.relpath(PHYSICAL_PROP_FILE))
+    print("Reading integrated_apriori.csv as the fluence, i.e. total number of neutrons/cm^2/eV, summed over the IRRADIATION_DURATION = {}\n".format(IRRADIATION_DURATION))
     apriori = pd.read_csv(os.path.join(sys.argv[-1], 'integrated_apriori.csv'))['value'].values # integrated_apriori.csv is a csv with header = value and number of rows = len(gs); no index.
-    print("Reading integrated_apriori.csv as the fluence, i.e. total number of neutrons/cm^2/eV, summed over the IRRADIATION_DURATION = {}".format(IRRADIATION_DURATION))
+    print(f"Reading ./{os.path.relpath(PHYSICAL_PROP_FILE)} to be interpreted as the physical parameters")
+    physical_prop = pd.read_csv(PHYSICAL_PROP_FILE, index_col=[0])
 
-    with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'r') as f:
+    with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE), 'r') as f:
         decay_dict = json.load(f)
         decay_dict = unserialize_dict(decay_dict)
     sigma_df = pd.read_csv(os.path.join(sys.argv[-1], 'response.csv'), index_col=[0])
@@ -263,39 +178,33 @@ if __name__=='__main__':
                             )*subchain.countable_photons,
                             # (# of photons detected per nuclide n decayed) = (# of photons detected per decay of nuclide n) * lambda_n * \int(population)dT
                     } for subchain in linearize_decay_chain(build_decay_chain(product, decay_dict))]
-    """
-    # get all negative cases and >1 cases for debugging purposes
-    debug_dict_negative, debug_dict_too_big, not_debug_dict = {}, {}, {}
-    for parent_product_mt, reaction in detected_counts_per_parent_material_nuclide.items():
-        for path in reaction:
-            # if len(path['pathway'].split('-'))==2:
-            if path['counts']<=0:
-                # print(path['counts'], '\t\t', path['pathway'])
-                debug_dict_negative[path['pathway']] = path['counts']
-            elif path['counts']>0.1:
-                debug_dict_too_big[path['pathway']] = path['counts']
-            else:
-                not_debug_dict[path['pathway']] = path['counts']
-            
-    debug_dict_negative = OrderedDict([(key, val) for (key, val) in ary(list(debug_dict_negative.items()))[np.argsort(list(debug_dict_negative.values()))]])
-    debug_dict_too_big = OrderedDict([(key, val) for (key, val) in ary(list(debug_dict_too_big.items()))[np.argsort(list(debug_dict_too_big.values()))]])
-    not_debug_dict = OrderedDict([(key, val) for (key, val) in ary(list(not_debug_dict.items()))[np.argsort(list(not_debug_dict.values()))]])
-    
-    differences, min_diff = {}, {}
-    for parent_product_mt in sigma_df.index:
-        product = parent_product_mt.split('-')[1]
-        for subchain in linearize_decay_chain(build_decay_chain(product, decay_dict)):
-            subchain_name = '-'.join(subchain.names)
-            differences[subchain_name] = check_differences(subchain.decay_constants)
-            if len(differences[subchain_name])>0:
-                min_diff[subchain_name] = min(differences[subchain_name])
-    min_diff = OrderedDict([(key, val) for (key, val) in ary(list(min_diff.items()))[np.argsort(list(min_diff.values()))]])
-
-    """
-    # """
-    population = pd.DataFrame({'production rate of primary product per parent atom':(sigma_df.values*_barn) @ apriori}, index=sigma_df.index)
-    population['total counts per primary product'] = [sum([path['counts'] for path in detected_counts_per_parent_material_nuclide[i]]) for i in sigma_df.index]
-    population['final counts accumulated per parent atom'] = population['total counts per primary product'] * population['production rate of primary product per parent atom']
+    # get the production rate for each reaction
+    population = pd.DataFrame({'production rate of primary product per parent atom':(sigma_df.values*BARN) @ apriori}, index=sigma_df.index)
+    # add the total counts of gamma photons detectable per primary product column
+    population['total gamma counts per primary product'] = [sum([path['counts'] for path in detected_counts_per_parent_material_nuclide[i]]) for i in sigma_df.index]
+    # add the final counts accumulated per parent atom column
+    population['final counts accumulated per parent atom'] = population['total gamma counts per primary product'] * population['production rate of primary product per parent atom']
+    # sort by activity and remove all nans
     population.sort_values('final counts accumulated per parent atom', inplace=True, ascending=False)
-    population.to_csv(os.path.join(sys.argv[-1], 'raw_counts_per_atom.csv'), index_label='rname')
-    # """
+    population = population[population['total gamma counts per primary product']>0.0] # keeping only those which aren't zeor, negative or nan.
+    # select the default materials and get its relevant parameters
+    default_material, partial_number_density = [], []
+    for parent_product_mt in population.index:
+        parent = parent_product_mt.split('-')[0]
+        if parent[len(extract_elem_from_string(parent)):]=='0': # take care of the species which are a MIXED natural composition of materials, e.g. Gd0
+            parent = parent[:-1]
+        if ENRICH_TO_100_PERCENT: # allowing enrichment means 100% of that element being made of the specified isotope only
+            parent = extract_elem_from_string(parent)
+        if parent not in physical_prop.columns:
+            default_material.append('Missing (N/A)')
+            partial_number_density.append(float('nan'))
+            continue
+        material_info = pick_material(parent, physical_prop)
+        default_material.append(material_info.name+" ("+material_info['Formula']+")")
+        partial_number_density.append(material_info['Number density-cm-3'] * material_info[parent])
+
+    population["default material"] = default_material
+    population["partial number density (cm^-3)"] = partial_number_density
+    population["gamma counts per volume of foil (cm^-3)"] = population["final counts accumulated per parent atom"] * population["partial number density (cm^-3)"]
+    population["gamma counts per unit thickness of foil (mm^-1)"] = population["gamma counts per volume of foil (cm^-3)"] * FOIL_AREA * MM_CM# assuming the area = Foil Area
+    population.to_csv(os.path.join(sys.argv[-1], 'counts.csv'), index_label='rname')
