@@ -433,8 +433,11 @@ def unserialize_dict(mixed_object):
     Turn the string representation of the uncertainties back into uncertainties.core.Variable 's.
     """
     if isinstance(mixed_object, dict):
-        for key, val in mixed_object.items():
-            mixed_object[key] = unserialize_dict(val)
+        if tuple(mixed_object.keys())==("x", "y", "interpolation"): # if the mixed_object is a openmc.data.Tabulated1D object in disguise:
+            mixed_object = tabulate(mixed_object)
+        else:
+            for key, val in mixed_object.items():
+                mixed_object[key] = unserialize_dict(val) # recursively un-serialize
     elif isinstance(mixed_object, list):
         for ind, item in enumerate(mixed_object):
             mixed_object[ind] = unserialize_dict(item)
