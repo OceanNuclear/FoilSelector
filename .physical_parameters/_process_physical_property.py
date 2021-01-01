@@ -2,6 +2,7 @@ from numpy import array as ary; import numpy as np
 import pandas as pd
 import os, sys, itertools
 from scipy.constants import Avogadro
+sys.path.append('../')
 from misc_library import (  extract_elem_from_string,
                             get_natural_average_atomic_mass,
                             get_elemental_fractions,

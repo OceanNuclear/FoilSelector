@@ -149,7 +149,7 @@ ENRICH_TO_100_PERCENT = False # allowing enrichment means 100% of that element b
 BARN = 1E-24
 MM_CM= 0.1
 
-PHYSICAL_PROP_FILE = "elemental_frac_isotopic_frac_physical_property.csv"
+PHYSICAL_PROP_FILE = ".physical_parameters/elemental_frac_isotopic_frac_physical_property.csv"
 CONDENSED_DECAY_INFO_FILE = 'decay_counts.json'
 
 if __name__=='__main__':

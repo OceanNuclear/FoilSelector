@@ -20,7 +20,7 @@ from misc_library import haskey, load_endf_directories, detabulate, EncoderOpenM
 FISSION_MTS = (18, 19, 20, 21, 22, 38)
 AMBIGUOUS_MT = (1, 3, 5, 18, 27, 101, 201, 202, 203, 204, 205, 206, 207, 649)
 
-photopeak_eff_curve = HPGe_efficiency_curve_generator('.')
+photopeak_eff_curve = HPGe_efficiency_curve_generator('.physical_parameters/Absolute_photopeak_efficiencyMeV.csv')
 gamma_E = [20*1E3, 4.6*1E6] # detectable gamma energy range
 
 def sort_and_trim_ordered_dict(ordered_dict, trim_length=3):
