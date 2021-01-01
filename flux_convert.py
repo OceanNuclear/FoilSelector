@@ -1,16 +1,21 @@
-from numpy import exp, cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np; tau = 2*pi
-from numpy import log as ln
-from matplotlib import pyplot as plt
-import pandas as pd
+# native python functions
+import csv
+from math import fsum
 import os, sys, glob
 join, base = os.path.join, os.path.basename
-import csv
+# numpy functions
+import numpy as np
+from numpy import exp
+from numpy import log as ln
+from numpy import array as ary
+# plotting and pandas
+from matplotlib import pyplot as plt
+import pandas as pd
+# openmc
 from openmc.data import INTERPOLATION_SCHEME, Tabulated1D
-from math import fsum
-import pickle
-from typing import Iterable
+# custom functions
+from misc_library import Integrate, MeV, detabulate, tabulate
 k, M = 1E3, 1E6
-MeV = 1E6
 
 '''
 An improvement upon convert_flux.py
@@ -25,96 +30,25 @@ def get_scheme(scheme):
 loglog = get_scheme('log-log')
 histogramic = get_scheme('histogram')
 
-def area_between_2_pts(xy1,xy2, xi,scheme):
-    x1, y1, x2, y2, xi = np.hstack([xy1, xy2, xi]).flatten()
-    assert x1<=xi<=x2, "xi must be between x1 and x2"
-    x_ = xi-x1
-    if x1==x2:
-        return 0.0  #catch all cases with zero-size width bins
-    if y1==y2 or scheme==1:# histogramic/ flat interpolation
-        return y1*x_ #will cause problems in all log(y) interpolation schemes if not caught
-    
-    dy, dx = y2-y1, x2-x1
-    logy, logx = [bool(int(i)) for i in bin(scheme-2)[2:].zfill(2)]
-    if logx:
-        assert(all(ary([x1,x2,xi])>0)), "Must use non-zero x values for these interpolation schemes"
-        lnx1, lnx2, lnxi = ln(x1), ln(x2), ln(xi)
-        dlnx = lnx2 - lnx1
-    if logy:
-        assert(all(ary([y1,y2])>0)), "Must use non-zero y values for these interpolation schemes"
-        lny1, lny2 = ln(y1), ln(y2)
-        dlny = lny2 - lny1
-
-    if scheme==2: # linx, liny
-        m = dy/dx
-        if xi==x2:
-            return dy*dx/2 + y1*dx
-        else:
-            return y1*x_ + m*x_**2 /2
-    elif scheme==3: # logx, liny
-        m = dy/dlnx
-        if xi==x2:
-            return y1*dx + m*(x2*dlnx-dx)
-        else:
-            return y1*x_ + m*(xi*(lnxi-lnx1)- x_)
-            return (y1 - m*lnx1)*x_ + m*(-x_+xi*lnxi-x1*lnx1)
-    elif scheme==4: # linx, logy
-        m = dlny/dx
-        if xi==x2:
-            return 1/m *dy
-        else:
-            return 1/m *y1*(exp(x_*m)-1)
-    elif scheme==5:
-        m = dlny/dlnx
-        if m==-1:
-            return y1 * x1 * (lnxi-lnx1)
-        if xi==x2:
-            return y1/(m+1) * ( x2 * (x2/x1)**m - x1 )
-        else:
-            return y1/(m+1) * ( xi * (1 + x_/x1)**m - x1 )
-    else:
-        raise AssertionError("a wrong interpolation scheme {0} is provided".format(scheme))
-
-class Integrate():
-    def __init__(self, sigma):
-        self.x = sigma.x
-        self.y = sigma.y
-        self.xy = ary([self.x, self.y])
-        assert all(np.diff(self.x)>=0), "the x axis must be inputted in ascending order"
-        self.interpolations = []
-        self.next_area = []
-        for i in range(len(self.x)-1):
-            break_region = np.searchsorted(sigma.breakpoints, i+1, 'right')
-            self.interpolations.append(sigma.interpolation[break_region])
-            # region_num = np.searchsorted(i, self.breakpoints, 'right')
-            # scheme = self.interpolation[region_num]
-            x1, x2 = sigma.x[i:i+2]
-            xy1 = ary([x1, sigma.y[i]])
-            xy2 = ary([x2, sigma.y[i+1]])
-            self.next_area.append(area_between_2_pts(xy1, xy2, x2, scheme=self.interpolations[i] ))
-    def __call__(self, a, b):
-        assert np.shape(a)==np.shape(b), "There must be as many starting points as the ending points to the integrations."
-        if isinstance(a, Iterable):
-            return ary([self(ai, bi) for (ai,bi) in zip(a,b)]) #catch all iterables cases.
-            # BTW, don't ever input a scalar into __call__ for an openmc.data.Tabulated1D function.
-            # It's going to return a different result than if you inputted an Iterable.
-            # Integrate(), on the other hand, doesn't have this bug.
-        
-        a, b = np.clip([a,b], min(self.x), max(self.x)) # assume if no data is recorded at the low energy limit.
-        ida, idb = self.get_region(a), self.get_region(b)
-        total_area = self.next_area[ida:idb]
-        total_area.append(-area_between_2_pts(self.xy[:,ida], self.xy[:,ida+1], a, self.interpolations[ida]))
-        total_area.append(area_between_2_pts(self.xy[:,idb], self.xy[:,idb+1], b, self.interpolations[idb]))
-        return fsum(total_area)
-
-    def get_region(self, x):
-        idx = np.searchsorted(self.x, x, 'right')-1
-        assert all([x<=max(self.x)]),"Out of bounds of recorded x! (too high)"
-        # assert all([0<=idx]), "Out of bounds of recorded x! (too low)" #doesn't matter, simply assume zero. See __call__
-        idx -= x==max(self.x) * 1 # if it equals eactly the upper limit, we need to minus one in order to stop it from overflowing.
-        return np.clip(idx, 0, None)
-
 def flux_conversion(flux_in, gs_in_eV, in_fmt, out_fmt):
+    """
+    Convert flux from a one representation into another.
+
+    Parameters
+    ----------
+    flux_in : flux to be converted into out_fmt. A pd.DataSeries/DataFrame, a numpy array or a list of (n) flux values.
+              The meaning of each of the n flux values is should be specified by the parameter in_fmt (see in_fmt below).
+
+    gs_in_eV : group-structure with shape = (n, 2), which denotes the upper and lower energy boundaries of the bin
+
+    in_fmt, out_fmt : string describing the format of the flux when inputted/outputted
+                      Accepted argument for fmt's:
+                        "per MeV",
+                        "per eV",
+                        "per keV",
+                        "integrated",
+                        "PUL"
+    """
     if isinstance(flux_in, pd.DataFrame) or isinstance(flux_in, pd.Series): # check type
         flux= flux_in.values.T
     else:
@@ -131,7 +65,7 @@ def flux_conversion(flux_in, gs_in_eV, in_fmt, out_fmt):
     elif in_fmt=='per keV':
         flux_per_eV = flux/1E3
     else:
-        assert in_fmt=="per eV", "the input format 'i' must be one of the following 4='integrated'|'PUL'(per unit lethargy)|'per (M)eV'"
+        assert in_fmt=="per eV", "the input format 'i' must be one of the following 4='integrated'|'PUL'(per unit lethargy)|'per (k/M)eV'"
         flux_per_eV = flux
     # convert from per eV back into 
     if out_fmt=='per MeV':
@@ -153,31 +87,49 @@ def flux_conversion(flux_in, gs_in_eV, in_fmt, out_fmt):
         setattr(flux_out, name_or_col, getattr(flux_in, name_or_col))
     return flux_out
 
-def easy_logspace(start, stop, **kwargs):
+def intuitive_logspace(start, stop, *args, **kwargs):
+    """
+    plug in the actual start and stop limit to the logspace function, without having to take log first.
+    """
     logstart, logstop = np.log10([start, stop])
-    return np.logspace(logstart, logstop, **kwargs)
-
-def integrate_continuous_flux(continuous_func, gs):
-    inte = Integrate(continuous_func)
-    return [inte(*minmax) for minmax in gs]
+    return np.logspace(logstart, logstop, *args, **kwargs)
 
 def get_integrated_apriori_value_only(directory):
+    """
+    Find integrated_apriori.csv in a specified directory and load in its values.
+    Written and saved in this module so that it can be imported by other modules in the future.
+    (i.e. written here for future compatibility)
+    """
     full_file_path = join(directory, "integrated_apriori.csv")
     integrated_apriori = pd.read_csv(full_file_path, sep="±|,", engine='python', skipinitialspace=True)
     return integrated_apriori['value'].values
 
 def get_continuous_flux(directory):
-    full_file_path = join(directory, "continuous_apriori.pkl")
-    with open(full_file_path,'rb') as f:
-        apriori_func = pickle.load(f)
-    return apriori_func
+    """
+    retrieve the continuous flux distribution (openmc.data.Tabulated1D object, stored in "continuous_apriori.csv") from a directory,
+    and turn it back into an openmc.data.Tabulated1D object.
+    """
+    detabulated_apriori_df = pd.read_csv(join(directory, "continuous_apriori.csv"))
+    detabulated_apriori = { "x":detabulated_apriori_df["x"].tolist(),
+                            "y":detabulated_apriori_df["y"].tolist(),
+                            "interpolation":detabulated_apriori_df["interpolation"].tolist()}
+    detabulated_apriori["interpolation"].pop()
+    return tabulate(detabulated_apriori)
 
 def get_gs_ary(directory):
+    """
+    Find the group structure of a specified directory and load in its values.
+    Written and saved in this module so that it can be iported by other modules in the future.
+    (I.e. written here for future compatibility).
+    """
     full_file_path = join(directory, "gs.csv")
     gs = pd.read_csv(full_file_path, skipinitialspace=True)
     return gs.values
 
 def list_dir_csv(directory):
+    """
+    Pretty print the list of all csv in a specified directory.
+    """
     fnames = glob.glob(join(directory, "*.csv"))
     print("########################")
     print("------------------------")
@@ -188,6 +140,9 @@ def list_dir_csv(directory):
     return fnames
 
 def open_csv(fname):
+    """
+    General function that opens any csv, where ",|±" are all intepreted as separators, and Header is optional.
+    """
     sniffer = csv.Sniffer()
     if sniffer.has_header(fname):
         df = pd.read_csv(fname, sep=",|±", skipinitialspace=True, engine='python')
@@ -196,12 +151,22 @@ def open_csv(fname):
     return df, df.columns
 
 def get_column_interactive(directory, datatypename, first_time_use=False):
+    """
+    Ask the user for the column in a csv file within the specified {directory}, containing the {datatypename}.
+    Keep asking until it is successfully found.
+    Parameters
+    ----------
+    directory : location to look for csv.
+    datatypename : name of the datatype which is displayed to the user when asking the question.
+    first_time_use : if False, modifies the prompt question by appending the string "(Can be the same file as above)",
+                     so that the user intuitively understands that the same file as the one used to answer the question in the previous call to this function can be used.
+    """
     while True:
         try:
             prompt = ""
             if not first_time_use:
                 prompt = "(Can be the same file as above)"
-            fname = input(f"Which of the above file contains values for {datatypename}?"+prompt)
+            fname = input(f"Which of the above file contains values for the {datatypename}?"+prompt)
             df, col = open_csv(join(directory,fname))
             print("Opened\n", df.head(), "\n...")
             colname = input(f"Please input the index/name of the column where {datatypename} is/are contained.\n(column name options include {list(col)})")
@@ -218,6 +183,16 @@ def get_column_interactive(directory, datatypename, first_time_use=False):
     return dataseries.values
 
 def ask_question(question, expected_answer_list, check=True):
+    """
+    Ask the user a multiple choice question.
+    Parameters
+    ----------
+    question : entire string of the question.
+    expected_answer_list : list of strings which are the expected answers.
+                           If the user gives an answer that isn't included the list, and check=True,
+                           then their answer will be discarded and the quesiton will be asked again until a matching answer is found.
+    check : see expected_answer_list
+    """
     while True:
         answer = input(question)
         if answer in expected_answer_list:
@@ -230,6 +205,27 @@ def ask_question(question, expected_answer_list, check=True):
     return answer
 
 def ask_yn_question(question):
+    """
+    Ask a yes no question
+    parameters
+    ----------
+    question : string containing the question to be displayed.
+
+    question displayed
+    ------------------
+    question+"('y'/'n')"
+
+    accepted inputs
+    ---------------
+    answer.lowercase() must be "yes", "y", "no" or "n".
+    e.g.
+    yes: ["yes", "y", "Yes", "YES", "Y"]
+    no: ["no", "n", "No", "NO", "N"]
+
+    returns
+    -------
+    Boolean (True/False)
+    """
     while True:
         answer = input(question+"('y','n')")
         if answer.lower() in ['yes', 'y']:
@@ -240,10 +236,26 @@ def ask_yn_question(question):
             print(f"Option {answer} not recognized; please retry:")
 
 def percentile_of(minmax_of_range, percentile=50):
+    """
+    Find the value that's a certain percent above the minimum of that range.
+    e.g. percentile_of([-1,1], 10) = -1 + (2)*0.1 = -0.8.
+
+    parameters
+    ----------
+    minmax_of_range: list containing the minimum value and maximum value of the range.
+    percentile : what percent above the minium is wanted.
+    """
     perc = float(percentile/100)
     return min(minmax_of_range) + perc*abs(np.diff(minmax_of_range))
 
 def scale_to_eV_interactive(gs_ary):
+    """
+    Scale the group structure values so that it describes the group structure in the correct unit (eV).
+
+    returns
+    -------
+    gs_ary : group structure array, of the same shape as the input gs_ary, but now each value describes the energy bin bounds in eV.
+    """
     gs_ary_fmt_unit_question = f"Were the group structure values \n{gs_ary}\n given in 'eV', 'keV', or 'MeV'?"
     #scale the group structure up
     gs_ary_fmt_unit = ask_question(gs_ary_fmt_unit_question, ['eV', 'keV', 'MeV'])
@@ -254,13 +266,27 @@ def scale_to_eV_interactive(gs_ary):
     return gs_ary
 
 def convert_arbitrary_gs_from_means(gs_means):
+    """
+    Create a group structure (n bins, with upper and lower bounds each) from a list of n numbers.
+    This is done by taking the first (n-1) numbers as the upper bounds of the last (n-1) bins,
+    and the last (n-1) numbers as the lower bounds of the first (n-1) bins.
+    The first bin's lower bound and the last bin's upper bound is obtained by
+    extrapolating the bin width of the second bin and the penultimate bin respectively.
+
+    parameters
+    ----------
+    gs_means : a list of n numbers, describing the class-mark of each bin.
+    """
     first_bin_size, last_bin_size = np.diff(gs_means)[[0,-1]]
     mid_points = gs_means[:-1]+np.diff(gs_means)/2
     gs_min = np.hstack([gs_means[0]-first_bin_size/2, mid_points])
     gs_max = np.hstack([mid_points, gs_means[-1]+last_bin_size/2])    
-    return ary([gs_min, gs_max])
+    return ary([gs_min, gs_max]).T
 
 def ask_for_gs(directory):
+    """
+    Check directory for a file containing a group structure; and interact with the program user to obtain said group structure.
+    """
     gs_fmt_question = "Were the flux values provided along with the mean energy of the bin ('class mark'), or the upper and lower ('class boundaries')?"
     gs_fmt = ask_question(gs_fmt_question, ['class mark', 'class boundaries'])
     if gs_fmt == 'class mark':
@@ -280,14 +306,17 @@ def ask_for_gs(directory):
             gs_min = np.logspace(start_point-average_step/2, end_point-average_step/2, num=len(gs_mean), endpoint=True)
             gs_max = np.logspace(start_point+average_step/2, end_point+average_step/2, num=len(gs_mean), endpoint=True)
         else: #neither log-spaced nor lin-spaced
-            gs_min, gs_max = convert_arbitrary_gs_from_means(gs_mean)
+            gs_min, gs_max = convert_arbitrary_gs_from_means(gs_mean).T
     elif gs_fmt == 'class boundaries':
-        gs_min = get_column_interactive(directory, 'lower bounds of the energy groups', first_time_use=True)
-        gs_max = get_column_interactive(directory, 'upper bounds of the energy groups')
+        while True:
+            gs_min = get_column_interactive(directory, 'lower bounds of the energy groups')#, first_time_use=True)
+            gs_max = get_column_interactive(directory, 'upper bounds of the energy groups')
+            if (gs_min<gs_max).all():
+                break
+            else:
+                print("The left side of the bins must have strictly lower energy than the right side of the bins. Please try again:")
     gs_ary = scale_to_eV_interactive( ary([gs_min, gs_max]).T )
     return gs_ary
-
-minmax = lambda lst: (min(lst),max(lst))
 
 if __name__=='__main__':
     print("The following inputs are needed")
@@ -300,7 +329,7 @@ if __name__=='__main__':
     
     print("1.1 Reading the a priori values---------------------------------------------------------------------------------------------")
     apriori = get_column_interactive(sys.argv[-1], "a priori spectrum's values (ignoring the uncertainty)", first_time_use=True)
-    apriori_copy = apriori.copy() # leave a copy to be used in section 1.5
+    apriori_copy = apriori.copy() # leave a copy to be used in section 4.
     fmt_question = "What format was the a priori provided in?('per eV', 'per keV', 'per MeV', 'PUL', 'integrated')"
     in_unit = ask_question(fmt_question, ['PUL','per MeV', 'per keV', 'per eV', 'integrated'])
     
@@ -308,7 +337,7 @@ if __name__=='__main__':
     group_or_point_question = "Is this a priori spectrum given in 'group-wise' (fluxes inside discrete bins) or 'point-wise' (continuous function requiring interpolation) format?"
     group_or_point = ask_question(group_or_point_question, ['group-wise','point-wise'])
     
-    print("1.3 Reading the energy values associated with the a priori------------------------------------------------------------------")
+    print("2. Reading the energy values associated with the a priori------------------------------------------------------------------")
     if group_or_point=='group-wise':
         apriori_gs = ask_for_gs(sys.argv[-1])
         apriori = flux_conversion(apriori, apriori_gs, in_unit, 'per eV')
@@ -337,14 +366,23 @@ if __name__=='__main__':
         if scheme==histogramic:
             E_values = np.hstack([E_values, E_values[-1]+np.diff(E_values)[-1]])
         apriori_gs = ary([E_values[:-1], E_values[1:]]).T
+
     if scheme==histogramic:
         apriori = np.hstack([apriori, apriori[-1]])
     continuous_apriori = Tabulated1D(E_values, apriori, breakpoints=[len(apriori),], interpolation=[scheme,])
 
-    plt.plot(x:=np.linspace(*minmax(E_values), num=200), continuous_apriori(x))
+    plt.plot(x:=np.linspace(min(E_values), max(E_values), num=200), continuous_apriori(x))
+    plt.show()
+    
+    #plot in lethargy scale
+    ap_plot = flux_conversion(apriori[:-1], apriori_gs, 'per eV', 'PUL')
+    plt.step(E_values, np.hstack([ap_plot, ap_plot[-1]]), where='post')
+    plt.yscale('log')
+    plt.xscale('log')
+    plt.title('lethargy scale plot')
     plt.show()
 
-    print("1.4 [optional] Modifying the a priori---------------------------------------------------------------------------------------")
+    print("3. [optional] Modifying the a priori---------------------------------------------------------------------------------------")
     # scale the peak up and down (while keeping the total flux the same)
     flux_shifting_question = "Would you like to shift the energy scale up/down?"
     to_shift = ask_yn_question(flux_shifting_question)
@@ -368,7 +406,7 @@ if __name__=='__main__':
                 print(e)
 
     #increase the flux up to a set total flux
-    total_flux = Integrate(continuous_apriori)(min(E_values), max(E_values))
+    total_flux = Integrate(continuous_apriori).definite_integral(min(E_values), max(E_values))
     flux_scaling_question = f"{total_flux = }, would you like to scale it up/down?"
     to_scale = ask_yn_question(flux_scaling_question)
 
@@ -388,14 +426,16 @@ if __name__=='__main__':
         plt.show()
     print(f"{total_flux = }")
 
-    print("1.5 [optional] adding an uncertainty to the a priori-------------------------------------------------------------------------")
+    print("4. [optional] adding an uncertainty to the a priori-------------------------------------------------------------------------")
     error_present = ask_yn_question("Does the a priori spectrum comes with an associated error (y-error bars) on itself?")
-    if not error_present:
-        pass
     if error_present:
-        error_series = get_column_interactive(sys.argv[-1], 'error (which should be of the same shape as the a priori spectrum input)')
-        fractional_error = error_series/apriori_copy
-        fractional_error[np.isnan(fractional_error)] = 0
+        error_series = get_column_interactive(sys.argv[-1], "error (which should be of the same shape as the a priori spectrum input)")
+        # allow the error to be inputted in either fractional error or absolute error.
+        absolute_or_fractional = ask_question("does this describe the 'fractional' or 'absolute' error?", ['fractional', 'absolute'])
+        if absolute_or_fractional=='fractional':
+            fractional_error = error_series
+        else:
+            fractional_error = np.nan_to_num(error_series/apriori_copy)
         if scheme==histogramic:
             fractional_error_ext = np.hstack([fractional_error, fractional_error[-1]])
             error = fractional_error_ext * apriori
@@ -430,7 +470,7 @@ if __name__=='__main__':
                 except ValueError as e:
                     print(e)
             if E_interp=='log-space':
-                gs_bounds = easy_logspace(E_min, E_max, num=E_num+1)
+                gs_bounds = intuitive_logspace(E_min, E_max, num=E_num+1)
             elif E_interp=='lin-space':
                 gs_bounds = np.linspace(E_min, E_max, num=E_num+1)
             gs_min, gs_max = gs_bounds[:-1], gs_bounds[1:]
@@ -443,16 +483,17 @@ if __name__=='__main__':
     ax.set_xlabel("flux(per eV)")
     ax.plot(x, continuous_apriori(x))
     ybounds = ax.get_ybound()
-    # yheight = np.diff(ybounds[::-1])/4
     for limits in gs_array:
         ax.errorbar(x=np.mean(limits), y=percentile_of(ybounds, 10), xerr=np.diff(limits[::-1])/2, capsize=30, color='black')
+        # Draw the group structure at ~10% of the height of the graph.
     plt.show()
 
     # plot the histogramic version of it once
-    integrated_flux = integrate_continuous_flux(continuous_apriori, gs_array)
+    integrated_flux = Integrate(continuous_apriori).definite_integral(*gs_array.T)
     if error_present:
-        uncertainty = (integrate_continuous_flux(continuous_apriori_upper,gs_array) - integrate_continuous_flux(continuous_apriori_lower,gs_array))/2
-        print("An (inaccurate) estimate of the error is provided as well. This is likely overestimated (by a factor of ~ sqrt(2)) as it does not obey the rules of error propagation properly.")
+        uncertainty = (Integrate(continuous_apriori_upper).definite_integral(*gs_array.T) -
+                        Integrate(continuous_apriori_lower).definite_integral(*gs_array.T) )/2
+        print("An (inaccurate) estimate of the error is provided as well. If a different group structure than the input file's group structure is used, then this error likely overestimated (by a factor of ~ sqrt(2)) as it does not obey the rules of error propagation properly.")
     
     gs_df = pd.DataFrame(gs_array, columns=['min', 'max'])
     gs_df.to_csv(join(sys.argv[-1], 'gs.csv'), index=False)
@@ -460,13 +501,18 @@ if __name__=='__main__':
     if not error_present:
         apriori_vector_df = pd.DataFrame(integrated_flux, columns=['value'])
     elif error_present:
-        apriori_vector_df = pd.DataFrame(integrated_flux, columns=['value', 'uncertainty'])
+        apriori_vector_df = pd.DataFrame(ary([integrated_flux, uncertainty]).T, columns=['value', 'uncertainty'])
     
     apriori_vector_df.to_csv(join(sys.argv[-1], 'integrated_apriori.csv'), index=False)
     
-    with open(join(sys.argv[-1],'continuous_apriori.pkl'), 'wb') as f:
-        pickle.dump(continuous_apriori, f)
+    # save the continuous a priori distribution (an openmc.data.Tabulated1D object) as a csv, by specifying the interpolation scheme as well.
+    detabulated_apriori = detabulate(continuous_apriori)
+    detabulated_apriori["interpolation"].append(0) # 0 is a placeholder, it doesn't correspond to any interpolation scheme, but is an integer so that pandas wouldn't treat it differently; unlike using None, which would force the entire column to become floats.
+    detabulated_apriori_df = pd.DataFrame(detabulated_apriori)
+    detabulated_apriori_df["interpolation"] = detabulated_apriori_df["interpolation"].astype(int)
+    detabulated_apriori_df.to_csv(join( sys.argv[-1], "continuous_apriori.csv"), index=False) # x already acts pretty well as the index.
+
     print("Preprocessing completed. The outputs are saved to:")
     print("group structure => gs.csv,")
     print("flux vector => integrated_flux.csv, ")
-    print("continuous apriori (a openmc.data.Tabulated1D object) => continuous apriori.csv")
+    print("continuous apriori (an openmc.data.Tabulated1D object) => continuous_apriori.csv")

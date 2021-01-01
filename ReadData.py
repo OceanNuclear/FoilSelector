@@ -1,336 +1,209 @@
-import openmc
-import time 
+# typical system/python stuff
+import os, sys, json
+from collections import OrderedDict
+from tqdm import tqdm
+# typical python numerical stuff
 from numpy import array as ary; import numpy as np
-import json, pickle
-import os, sys
-# import logging
-# logHanlder = logging.Handler()
-# logging.addHandler(logHanlder)
-'''
-Purpose:
-    Read in all nuclides from their endf files into a format that we care about (a Reaction instance),
-        from which we can quickly extract information about.
-    The reaction's sigma WON'T be stored if we don't know ALL of its product's decay information.
-    
-    We can only assume that no alpha/neutrons will be emitted by that nuclide after neutron irradiation
-        by its un-documented decay products by the time it gets into the HPGe,
-        Since these decay products are likely fast-decaying.
-Exclusions:
-    Try to exclude atoms that can fission.
-'''
-EXCLUDE_FISSION = True
-MF = { 'inc':3, 'decay':8, 'inc_covar':33, 'decay_covar':40 , 'general_info':1, 'resonance_params':2, 'decay_multiplicities':9, 'radionuclide_production_cross_section':10}
-def welcome_message():
-    try:
-        folder_list = sys.argv[1:]
-        assert len(folder_list)>0
-        #Please update your python to 3.6 or later.
-        print(f"Reading from {len(folder_list)} folders,")
-        endf_file_list = []
-        for folder in folder_list:
-            endf_file_list += [os.path.join(folder, file) for file in os.listdir(folder) if file.endswith('.endf') or file.endswith('.asc')]
-    except (IndexError, AssertionError):
-        print("usage:")
-        print("'python "+sys.argv[0]+" folders/ containing/ endf/ files/ in/ descending/ order/ of/ priority/ [output/]'")
-        print("where the outputs-saving directory 'output/' is only requried when read_apriori_and_gs_df is used.")
-        print("Use wildcard (*) if necessary")
-        print("The endf files in question can be downloaded")
-        # by running the make file.")
-        # from https://www.oecd-nea.org/dbforms/data/eva/evatapes/eaf_2010/ and https://www-nds.iaea.org/IRDFF/
-        # Currently does not support reading h5 files yet, because openmc does not support reading ace/converting endf into hdf5/reading endf using enjoy yet
-        sys.exit()
+from numpy import log as ln
+import pandas as pd
+# openmc stuff
+import openmc
+from openmc.data import IncidentNeutron, Decay, Evaluation
+from openmc.data.reaction import REACTION_NAME
+# uncertainties
+import uncertainties
+from uncertainties.core import Variable
+# custom modules
+from flux_convert import Integrate
+from misc_library import haskey, load_endf_directories, detabulate, EncoderOpenMC, HPGe_efficiency_curve_generator, MT_to_nuc_num
 
-    print(f"Found {len(endf_file_list)} regular files ending in '.endf' or '.asc' ...")
-    #read in each file:
-    endf_data = []
-    for path in endf_file_list:
-        try:
-            endf_data += openmc.data.get_evaluations(path)#works with IRDFF/IRDFFII.endf and EAF/*.endf
-        except:
-            endf_data += [openmc.data.Evaluation(path),] # works with decay/decay_2012/*.endf
-    return endf_data
-    
-'''
-Must use openmc.data.get_evaluations in this manner( using data.endf.Evaulation('eaf/*.endf') ), because:
-1. openmc.data.get_evaluations can't read the covariance data left in the ```cat eaf/*.endf > all_eaf``` file
-    (EAF data is similar enough to endf file that it can be read like a endf file on its own; but once EAF files are concatenated together, you can't read it like an ENDF file anymore.)
-2. openmc.data.IncidentNeutron will lead to 743 lines being ignored in the IRDFF file:
-    (MT=[3,23,11,4,3,11,9,3,21,9,3,31,11,3,17,9,3,17,9,3,25,11,3,25,11,3,9,9,3,16,9,3,13,9,3,11,9,3,13,9,3,15,9,316,])
+FISSION_MTS = (18, 19, 20, 21, 22, 38)
+AMBIGUOUS_MT = (1, 3, 5, 18, 27, 101, 201, 202, 203, 204, 205, 206, 207, 649)
 
-'''
+photopeak_eff_curve = HPGe_efficiency_curve_generator('.')
+gamma_E = [20*1E3, 4.6*1E6] # detectable gamma energy range
 
-def read_reformatted(working_dir):
-    with open(os.path.join(working_dir, 'reactions.pkl'), 'rb') as f:
-        rdict = pickle.load(f)
-    with open (os.path.join(working_dir, 'decay_radiation.pkl'), 'rb') as f:
-        dec_r = pickle.load(f)
-    with open (os.path.join(working_dir, 'all_mts.json'), 'r') as f:
-        all_mts = json.load(f)
-    return rdict, dec_r, all_mts
+def sort_and_trim_ordered_dict(ordered_dict, trim_length=3):
+    """
+    sort an ordered dict AND erase the first three characters (the atomic number) of each name
+    """
+    return OrderedDict([(key[trim_length:], val)for key,val in sorted(ordered_dict.items())])
 
-def save_reformatted(rdict, dec_r, all_mts, working_dir):
-    with open(os.path.join(working_dir, 'reactions.pkl'), 'wb') as f:
-        pickle.dump(rdict, f)
-    with open (os.path.join(working_dir, 'decay_radiation.pkl'), 'wb') as f:
-        pickle.dump(dec_r, f)
-    with open (os.path.join(working_dir, 'all_mts.json'), 'w') as f:
-        json.dump(all_mts, f)
+def extract_decay(dec_file):
+    """
+    extract the useful information out of an openmc.data.Decay entry
+    """
+    half_life = Variable(np.clip(dec_file.half_life.n, 1E-23, None), dec_file.half_life.s) # increase the half-life to a non-zero value.
+    decay_constant = ln(2)/(half_life)
+    modes = {}
+    for mode in dec_file.modes:
+        modes[mode.daughter] = mode.branching_ratio
+    return dict(decay_constant=decay_constant, branching_ratio=modes, spectra=dec_file.spectra)
+
+def condense_spectrum(dec_file):
+    """
+    We will explicitly ignore all continuous distributions because they do not show up as clean gamma lines.
+    Note that the ENDF-B/decay/ directory stores a lot of spectra (even those with very clear lines) as continuous,
+        so it may lead to the following method ignoring it.
+        The workaround is just to use another library where the evaluators aren't so lazy to not use the continuous_flag=='both' :/
+    """
+    count = Variable(0.0,0.0)
+    if haskey(dec_file['spectra'], 'gamma') and haskey(dec_file['spectra']['gamma'], 'discrete'):
+        norm_factor = dec_file['spectra']['gamma']['discrete_normalization']
+        for gamma_line in dec_file['spectra']['gamma']['discrete']:
+            if np.clip(gamma_line['energy'].n, *gamma_E)==gamma_line['energy'].n:
+                count += photopeak_eff_curve(gamma_line['energy']) * gamma_line['intensity']/100 * norm_factor
+    if haskey(dec_file['spectra'], 'xray') and haskey(dec_file['spectra']['xray'], 'discrete'):
+        norm_factor = dec_file['spectra']['xray']['discrete_normalization']
+        for xray_line in dec_file['spectra']['xray']['discrete']:
+            if np.clip(xray_line['energy'].n, *gamma_E)==xray_line['energy'].n:
+                additional_counts = photopeak_eff_curve(xray_line['energy']) * xray_line['intensity']/100 * norm_factor
+                if not additional_counts.s<=additional_counts.n:
+                    additional_counts = Variable(additional_counts.n, additional_counts.n) # clipping the uncertainty so that std never exceed the mean. This takes care of the nan's too.
+                count += additional_counts
+    del dec_file['spectra']
+    dec_file['countable_photons'] = count #countable photons per decay of this isotope
     return
 
-class Reaction:
-    def __init__(self, openmcRlist, openmc_eval_list, rcomplist, resonances_list, kTs_list):
-        #did not load resonance covariances because it likes to misbehave
-        assert len(openmcRlist)>0
-        mt = openmcRlist[0].mt
-        #Things that I'd only take the first value for as a representative value.
-        # for v in openmcRlist[0].values():
-        #     self.sigma = v #choose the last cross-section, i.e. the one at the highest temperature.
-        self.sigma = openmcRlist[0].xs['0K']
-        if hasattr(self.sigma, 'background'):
-            self.sigma=self.sigma.background
-        self.kTs = kTs_list[0]
-        self.q_value = openmcRlist[0].q_value
+def deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, mt):
+    """
+    Given the atomic number and mass number, get the daughter in the format of 'Ag109'.
+    """
+    if 50<mt<=91:
+        element_symbol = openmc.data.ATOMIC_SYMBOL[parent_atomic_number]
+        product_mass = str(parent_atomic_mass)
+        return element_symbol+product_mass+f'_m{mt-50}'
+    element_symbol = openmc.data.ATOMIC_SYMBOL[parent_atomic_number + MT_to_nuc_num[mt][0]]
+    product_mass = str(parent_atomic_mass + MT_to_nuc_num[mt][1])
+    if len(MT_to_nuc_num[mt])>2 and MT_to_nuc_num[mt][2]>0: # if it indicates an excited state
+        excited_state = '_m'+str(MT_to_nuc_num[mt][2])
+        return element_symbol+product_mass+excited_state
+    else:
+        return element_symbol+product_mass
 
-        #Things that I'd save the complete list for
-        self.alternatives = openmcRlist #still save the whole list
-        
-        #Things taht I'd sum over the entire list 
-        self.redundant = any([r.redundant for r in openmcRlist])
-        self.products = [ r.products for r in openmcRlist ]
-        self.products += [ r.derived_products for r in openmcRlist ]
-        self.reaction_component_lists = rcomplist
-        self.resonances_list = resonances_list        
+def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True):
+    """
+    For a given (mf, mt) file,
+    Extract only the important bits of the informations:
+    actaul cross-section, and the yield for each product.
+    Outputs a list of these modified cross-sections (which are multiplied onto the thing if possible)
+        along with all their names.
+    The list can then be added into the final reaction dictionary one by one.
+    """
+    appending_name_list, xs_list = [], []
+    xs = rx_file.xs['0K']
+    if len(rx_file.products)==0:
+        name = deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, rx_file.mt)+'-MT='+str(rx_file.mt) # deduce_daughter_from_mt will return the ground state value
+        appending_name_list.append(name)
+        xs_list.append(detabulate(xs) if (not tabulated) else xs)
+    else:
+        for prod in rx_file.products:
+            appending_name_list.append(prod.particle.replace('_e', '_m')+'-MT='+str(rx_file.mt))
+            partial_xs = openmc.data.Tabulated1D(xs.x, prod.yield_(xs.x) * xs.y,
+                                                breakpoints=xs.breakpoints, interpolation=xs.interpolation)
+            xs_list.append(detabulate(partial_xs) if (not tabulated) else partial_xs)
+    return appending_name_list, xs_list
 
-        #Read the openmc_eval_list's relevant sections
-        self.products_name = []
-        self.parent = openmc_eval_list[0].target
-        matching_section = (8, mt)
-        for eval_file in openmc_eval_list: #TERRIBLE bodge to read backwards to find out the relevant MF=8 file from the Evaluation object's section attribute.
-            if matching_section in eval_file.section.keys():
-                second_line_onwards = eval_file.section[matching_section].split("\n ")[1:]
-                for line in second_line_onwards:
-                    try:
-                        ZA = int(float(line.split()[0].replace("+", "e")))
-                        gnd_name = openmc.data.gnd_name( ZA//1000, ZA%1000, int(line.split()[3]) )
-                        self.products_name.append(gnd_name)
-                    except:
-                        print("No products_name not found for", self.parent['zsymam'], "mt=",mt)
-
-def get_names(endf_data):
-    # Sorting the gnd_names into order:
-    gnd_name_list = [iso.gnd_name for iso in endf_data] # get all the isotope names
-    eval_names = [ repr(iso) for iso in endf_data ]
-    repr_name_list = [ iso.replace("Incident-neutron","Incident neutron").split()[4] for iso in eval_names]# and trim them.
-    sorting_names = [ "-".join([ iso.split("-")[i].zfill(3-2*i) for i in range(3)]) for iso in repr_name_list]
-    sorting_names, gnd_name_list = [ list(t) for t in zip(*sorted(zip(sorting_names, gnd_name_list))) ]
-    #print information about usable number of isomers
-    print("There are", len(endf_data)-len(set(eval_names)),"repeated entries.")
-    print(f"{len(set(gnd_name_list))} unique isomers were found.")
-    print()
-    return gnd_name_list, repr_name_list, sorting_names
-
-def analyse_numbers_and_overlaps(endf_data, repr_name_list):
-    # Print preliminary analysis to see how much of that data is unique.
-    print("################Preliminary data analysis################")
-    incident_neutron = [iso.gnd_name for iso in endf_data if (MF['inc']         in ary(iso.reaction_list)[:,0])] # Get the list of files containing Incident-neutron data
-    neutron_covar    = [iso.gnd_name for iso in endf_data if (MF['inc_covar']   in ary(iso.reaction_list)[:,0])] # 
-    decay            = [iso.gnd_name for iso in endf_data if (MF['decay']       in ary(iso.reaction_list)[:,0])] # 
-    decay_covar      = [iso.gnd_name for iso in endf_data if (MF['decay_covar'] in ary(iso.reaction_list)[:,0])] # 
-    prod_cross_sec   = [iso.gnd_name for iso in endf_data if (MF['radionuclide_production_cross_section'] in ary(iso.reaction_list)[:,0])] # 
-    overlapping_isomer_set = list(set([ iso for iso in incident_neutron if (iso in decay) ]))
-    fully_equipped_isomer_set = list(set([ iso for iso in incident_neutron if (iso in neutron_covar) and (iso in decay) and (iso in decay_covar) and (iso in prod_cross_sec) ]))
-    zero_mass_isomer = [ _sort_name for _sort_name in repr_name_list if _sort_name.split("-")[-1]=='0' ]
-    print(f"{len(incident_neutron)} files containing incident neutron data, spread over {len(set(incident_neutron))} isomers were found,")
-    print(f"{len(neutron_covar)} files containing incident neutron data's covariances, spread over {len(set(neutron_covar))} isomers were found,")
-    print(f"{len(prod_cross_sec)} files containing radionuclide production cross sections, spread over {len(set(prod_cross_sec))} isomers were found,")
-    print()
-    print(f"{len(decay)} files containing decay data (either from incident neutrons, or directly), spread over {len(set(decay))} isomers were found,")
-    print(f"{len(decay_covar)} files containing decay data's covariances, spread over {len(set(decay_covar))} isomers were found,")
-    print()
-    print(f"{len(overlapping_isomer_set)} isomers were found to have data of both incident neutrons and decay data; while")
-    print(f"{len(fully_equipped_isomer_set)} isomers were found to have data of all five data types (mf numbers) listed above.")
-    print(f"{(n:=len(set(zero_mass_isomer)))} natural composition elements (i.e. isomers with mass number=0) were found,")
-    #Please update your python to 3.8 or later.
-    print(" "*(len(str(n))+1)+"and will be used with the highest priority when the user does not specify the isotopic composition.")
-
-    print(f"Otherwise, the priority follows the order that the files were read in.")
-    return incident_neutron, neutron_covar, decay, decay_covar, prod_cross_sec, overlapping_isomer_set, fully_equipped_isomer_set
-
-def get_all_mt(iso_dict):
-    print("Converting the data from openmc.data.Evaluation() objects into openmc.data.IncidentNeutron()/.Decay() objects...")
-    starttime = time.time()
-    # local dictionary, i.e. there are as many of these are there are isotopes.
-    inc_r, dec_r = {}, {} #stores the entire reaction object
-    inc_mt, rcomp, kTs, resonances = {}, {}, {}, {} # stores ony the mt number, the reaction_components, 
-    # returns these information when given the gnd_name (and in other cases mt numebr).
-    
-    #global dictionary
-    all_mts = {}
-    rcomplist = {}
-    for gnd_name, data_list in iso_dict.items():
-        inc_r[gnd_name] = {} #create empty dict ready to receive the openmc.data.IncidentNeutron objects
-        inc_mt[gnd_name] = set() #create emtpy set ready to receive the mt numbers
-        rcomp[gnd_name] = {}
-        resonances[gnd_name], kTs[gnd_name] = [], []
-
-        for data in data_list:
-            if "Incident" in repr(data):
-                inc = openmc.data.IncidentNeutron.from_endf(data)
-                for r in inc.reactions.values():
-                    inc_mt[gnd_name].add(r.mt)
-                    all_mts[int(r.mt)] = repr(r)[11:-1].split(" ")[-1]
-                    if not ( r.mt in inc_r[gnd_name].keys() ): inc_r[gnd_name][r.mt] = [] #if no corresponding list, then start one.
-                    inc_r[gnd_name][r.mt].append(r)
-                    if not ( r.mt in rcomp[gnd_name].keys() ): rcomp[gnd_name][r.mt] = [] #if no corresponding list, then start one.
-                    rcomp[gnd_name][r.mt] += inc.get_reaction_components(r.mt)
-                kTs[gnd_name].append(inc.kTs)
-                resonances[gnd_name].append(inc.resonances)
+def clean_up_missing_records(xs_dict, decay_dict):
+    """
+    If there are entries in the xs_dict that gives a very unstable product (e.g. Ag_m22) as a primary product:
+        so unstable such that there ISN'T a record of it in the decay_dict, then we can only assume that it will immediately decay to the ground state of that isotope as soon as it's produceds.
+    """
+    print("Cleaning up the fast-decaying isotopes by assuming that they decay directly to the ground state:")
+    for parent_product_mt in tqdm(list(xs_dict.keys())):
+        if parent_product_mt.split('-')[1] not in decay_dict.keys(): # product not recorded as an isotope in decay_dict
+            parent, product, long_mt = parent_product_mt.split('-')
+            new_product = product.split('_')[0]
+            if new_product in decay_dict.keys():
+                new_name = '-'.join([parent, new_product, long_mt])
+                if new_name in xs_dict.keys():
+                    # merge with existing xs record
+                    xs2 = xs_dict[new_name] # expand out the xs2 in the next step. Assuming xs2 and xs would have the same group structure.
+                    xs_dict[new_name] = openmc.data.Tabulated1D(xs2.x, xs2.y+xs_dict[parent_product_mt].y, breakpoints=xs2.breakpoints, interpolation=xs2.interpolation) # modify existing entry
+                else:
+                    xs_dict[new_name] = xs_dict[parent_product_mt] # create entirely new xs entry
+                del xs_dict[parent_product_mt] # remove the old, unstable parent entry.
             else:
-                dec = openmc.data.Decay.from_endf(data)
-                if not gnd_name in dec_r.keys():
-                    dec_r[gnd_name] = []
-                dec_r[gnd_name].append(dec)
-    print(f"taken {time.time()-starttime} s to convert the data from Evaulation() objects into IncidentNeutron()/ Decay() objects")
-    return inc_r, inc_mt, all_mts, rcomp, resonances, kTs, dec_r
-translation = {
-    2:(0, 0),
-    4:(0, 0),
-    11:(-1, -3),
-    16:(0, -1),
-    17:(0, -2),
-    22:(-2, -4),
-    23:(-6, -12),
-    24:(-2, -5),
-    25:(-2, -6),
-    28:(-1, -1),
-    29:(-4, -8),
-    30:(-4, -9),
-    32:(-1, -2),
-    33:(-1, -3),
-    34:(-2, -3),
-    35:(-5, -10),
-    36:(-5, -11),
-    37:(0, -3),
-    41:(-1, -2),
-    42:(-1, -3),
-    44:(-2, -2),
-    45:(-3, -5),
-    102:(0, 1),
-    103:(-1, 0),
-    104:(-1, -1),
-    105:(-1, -2),
-    106:(-2, -2),
-    107:(-2, -3),
-    108:(-4, -7),
-    109:(-6, -11),
-    111:(-2, -1),
-    112:(-3, -4),
-    113:(-5, -10),
-    114:(-5, -9),
-    115:(-2, -2),
-    116:(-2, -3),
-    117:(-3, -5),
-    152:( 0, -4),
-    153:( 0, -5),
-    154:(-1, -4),
-    155:(-3, -6),
-    156:(-1, -4),
-    157:(-1, -4),
-    158:(-3, -6),
-    159:(-3, -6),
-    160:( 0, -6),
-    161:( 0, -7),
-    162:(-1, -5),
-    163:(-1, -6),
-    164:(-1, -7),
-    165:(-2, -7),
-    166:(-2, -8),
-    167:(-2, -9),
-    168:( -2, -10),
-    169:(-1, -5),
-    170:(-1, -6),
-    171:(-1, -7),
-    172:(-1, -5),
-    173:(-1, -6),
-    174:(-1, -7),
-    175:(-1, -8),
-    176:(-2, -4),
-    177:(-2, -5),
-    178:(-2, -6),
-    179:(-2, -4),
-    180:(-4, -10),
-    181:(-3, -7),
-    182:(-2, -4),
-    183:(-2, -3),
-    184:(-2, -4),
-    185:(-2, -5),
-    186:(-3, -4),
-    187:(-3, -5),
-    188:(-3, -6),
-    189:(-3, -7),
-    190:(-2, -3),
-    191:(-3, -3),
-    192:(-3, -4),
-    193:(-4, -6),
-    194:(-2, -5),
-    195:( -4, -11),
-    196:(-3, -8),
-    197:(-3, -2),
-    198:(-3, -3),
-    199:(-4, -8),
-    200:(-2, -6),
-    800:(-2, -3),
-    801:(-2, -3)
-    }
+                print("Non existant decay product found! {} is an expected product of {}-{}, but is not present in decay_dict.".foramt(product, parent, long_mt))
+                del xs_dict[parent_product_mt]
 
-def main_read():
-    endf_data = welcome_message()
-    print(f"Loaded {len(endf_data)} different mateiral files,\n")
-    # get all the openmc.data.Evaluation objects' names,
-    gnd_name_list, repr_name_list, sorting_names = get_names(endf_data)
-    
-    analyse_numbers_and_overlaps(endf_data, repr_name_list)
-
-    # This allows sorting by element, and then by mass number.
-    # #Give it a name for sorting purpose.
-    # for i in range(len(endf_data)):
-    #     endf_data[i]._sort_name = sorting_names[i]
-        # endf_data[n].info['identifier'] gives the database ('EAF' vs not 'EAF'('IRDFF' or 'ENDF-V/B')) and MAT number.
-    #Turn it into a dictionary using dict comprehension:
-    print("performing dict comprehension into iso_dict")
-    iso_dict = { gnd_name:[ eval_obj for eval_obj in endf_data if eval_obj.gnd_name==gnd_name ] for gnd_name in gnd_name_list } # may lead to repeated data entry, but that's okay, because we're using a dictionary.
-    
-    inc_r, inc_mt, all_mts, rcomp, resonances, kTs, dec_r = get_all_mt(iso_dict) # These information is necessary for initializing the Reaction objects in the rdict.
-    '''
-    #inc_r[gnd_name][mt] = openmc.data.IncidentNeutron.from_endf(Evaulation_file_obj).reaction[mt]
-    #inc_mt[gnd_name] = set(all_reactions_mts_for_that_isomer)
-    #all_mts[mt]= set(all_reaction_mts)
-    '''
-    rdict = {}
-    starttime = time.time()
-    for gnd_name, data_collection in iso_dict.items():
-        rdict[gnd_name]={ mt:Reaction(inc_r[gnd_name][mt], data_collection, rcomp[gnd_name][mt], resonances[gnd_name], kTs[gnd_name]) for mt in inc_mt[gnd_name] }
-        if EXCLUDE_FISSION:
-            if 18 in rdict[gnd_name].keys():
-                rdict[gnd_name]={}
-                print("Excluded", gnd_name, "as it is fissionable/fissile")
-    print(f"taken {time.time()-starttime} s to convert the evaluation objects into Reaction() objects")
-
-    return rdict, dec_r, all_mts
+def collapse_xs(xs_dict, gs_ary):
+    """
+    Calculates the group-wise cross-section in the given group-structure
+    by averaging the cross-section within each bin.
+    """
+    collapsed_sigma = dict()
+    print("Collapsing the cross-sections to the correct group-structure...")
+    for parent_product_mt, xs in tqdm(xs_dict.items()):
+        I = Integrate(xs)
+        collapsed_sigma[parent_product_mt] = ary([I(*gs_ary[i])/np.diff(gs_ary[i]) for i in range(len(gs_ary))]).flatten()
+    return pd.DataFrame(collapsed_sigma).T
 
 if __name__=='__main__':
-    rdict, dec_r, all_mts = main_read()
-    save_reformatted(rdict, dec_r, all_mts, sys.argv[-1])
+    assert os.path.exists(os.path.join(sys.argv[-1], 'gs.csv')), "Output directory must already have gs.csv"
+    gs = pd.read_csv(os.path.join(sys.argv[-1], 'gs.csv')).values
+    if (SORT_BY_REACTION_RATE:=True):
+        assert os.path.exists(os.path.join(sys.argv[-1], 'integrated_apriori.csv')), "Output directory must already have integrated_apriori.csv in order to sort the response.csv in descending order of expected-radionuclide-population later on."
+        apriori = pd.read_csv(os.path.join(sys.argv[-1], 'integrated_apriori.csv'))['value'].values
+    endf_file_list = load_endf_directories(sys.argv[1:])
+    print(f"Loaded {len(endf_file_list)} different mateiral files,\n")
 
-# Next thing to do: deal with the cases where product_num isn't present/is wrong.
-# Turns out all IncidentNeutron objects cannot have reaction 457 stored inside them.
+    # First compile the decay records
+    print("\nCompiling the decay_dict...")
+    decay_dict = OrderedDict()
+    for file in tqdm(endf_file_list):
+        if repr(file).strip('<>').startswith('Radio'): # applicable to materials with (mf, mt) = (8, 457) file section
+            dec_f = Decay.from_endf(file)
+            decay_dict[str(dec_f.nuclide['atomic_number']).zfill(3)+dec_f.nuclide['name']] = extract_decay(dec_f)
+    decay_dict = sort_and_trim_ordered_dict(decay_dict) # reorder it so that it conforms to the 
+    
+    # Save said decay records
+    with open(os.path.join(sys.argv[-1], FULL_DECAY_INFO_FILE:='decay_radiation.json'), 'w') as f:
+        print("\nSaving the decay spectra as {} ...".format(FULL_DECAY_INFO_FILE))
+        json.dump(decay_dict, f, cls=EncoderOpenMC)
+    sys.exit()
 
-'''
-objective (kept here for future development use; currently this can be ignored.)
-1. Given the database, get all isomers, then sorted by , aand then by a specific order/ priority. 
-1.1 Check if the covariance line has anything, if so, grab that raw file section too.
-1.2 convert to IncidentNeutron data and obtain the cross-section from .xs['0K'].x and .xs['0K'].y
-2. Get reaction products from the MF=8 file for each reaction; if not, deduce it. (It seems like I never have to deduce any.)
-3. Search for the relevant openmc.data.Decay spectrum
-4. Return the interested isomer's all relevant xs.
-'''
+    # turn decay records into number of counts
+    print("\nCondensing each decay spectrum...")
+    for name, dec_file in tqdm(decay_dict.items()):
+        condense_spectrum(dec_file)
+        
+    # Then compile the Incident-neutron records
+    print("\nCompiling the raw cross-section dictionary ...")
+    xs_dict = OrderedDict()
+    for file in tqdm(endf_file_list):
+        if repr(file).strip('<>').startswith('Incident-neutron'):
+            inc_f = IncidentNeutron.from_endf(file)
+            nuc_sort_name = str(inc_f.atomic_number).zfill(3)+inc_f.name
+
+            for mt, rx in inc_f.reactions.items():
+                xs_raw = rx.xs['0K']
+                
+                # ignore the entries that isn't telling us the cross-section (which are usually mf=2 files which tells us about resonances, which I don't care)
+                if not hasattr(xs_raw, 'x'):
+                    continue # skip the mt's that doesn't actually give us the cross-sections
+                if any([(mt in AMBIGUOUS_MT), (mt in FISSION_MTS), (301<=mt<=459)]):
+                    continue # skip the cases of AMBIGUOUS_MT, fission mt, and heating information. They don't give us useful information about radionuclides produced.
+
+                append_name_list, xs_list = extract_xs(inc_f.atomic_number, inc_f.mass_number, rx, tabulated=True)
+                for name, xs in zip(append_name_list, xs_list):
+                    xs_dict[nuc_sort_name+'-'+name] = xs
+    clean_up_missing_records(xs_dict, decay_dict)
+    xs_dict = sort_and_trim_ordered_dict(xs_dict)
+
+
+    print("\nCollapsing the cross-section to the group structure specified in 'gs.csv' and saving it as 'response.csv' ...")
+    sigma_df = collapse_xs(xs_dict, gs)
+    if SORT_BY_REACTION_RATE:
+      sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]
+    sigma_df.to_csv(os.path.join(sys.argv[-1], 'response.csv'))
+    # saves the number of radionuclide produced per (neutron cm^-2) of fluence flash-irradiated in that given bin.
+
+    
+    with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'w') as f:
+        print("\nSaving the condensed decay information as {} ...".format(CONDENSED_DECAY_INFO_FILE))
+        json.dump(decay_dict, f, cls=EncoderOpenMC)
+
+    """
+    See _check_stuff.py for the to-do list. 2020-12-06 15:50:18
+    """

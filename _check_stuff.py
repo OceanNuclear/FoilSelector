@@ -14,20 +14,24 @@ from collections import defaultdict
 FISSION_MTS = (18, 19, 20, 21, 22, 38)
 """
 Following the workflow:
+8.5 redo with faster and larger library.
 -1. Plot the gamma peaks and find overlaps
 Exploratory file, with the current objectives of:
-1. Figure out how to treat the unmatched E_max and E_min energy cases. (CHECK_LIMITS)
-4. Speed up the integration by taking advantage of numpy
-2. Check to make sure that every library uses products[*].yield_.interpolation==2 (CHECK_YIELD)
-6. change the count rates 0.0+/-nan to 0.0+/-0.0
 7. use the extract_xs executable from FISPACT
-8. Redo the Integrate class
+1. Figure out how to treat the unmatched E_max and E_min energy cases. (CHECK_LIMITS)
+2. Check to make sure that every library uses products[*].yield_.interpolation==2 (CHECK_YIELD)
+10. Write unittest for Integrate2 (which, BTW, should be renamed.)
 
 DONE: 
 # -2. Caclulate rname| volume| thicknesses
 # 3. Figure out how to treat continuous_flag=='both'/'continuous' distribution of gamma. (CHECK_DECAY_CONT)
 # 5. Change the decay_dict[...]['mode'] from [{"daughter":"Al27", "branching_ratio":1.0+/-0.0}] to {"Al27":1.0+/-0.0} and make the rest of the handling pretty.
+# 4. Speed up the integration by taking advantage of numpy
+# 9. Rewrite flux_convert to use detabulate instead of pkl
+# 8. Incorperate the Integrate class into flux_convert.py and _ReadData.py
 
+Deprecated jobs:
+# 6. change the count rates 0.0+/-nan to 0.0+/-0.0
 """
 
 CHECK_MAX_E = False

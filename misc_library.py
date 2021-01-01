@@ -1,12 +1,16 @@
+# default system packages
+import os, sys, json
+from typing import Iterable
+from tqdm import tqdm
+# special numerical computing packages
 import numpy as np
+from numpy import array as ary
 import uncertainties
 from uncertainties.core import Variable
 import pandas as pd
-import os, sys, json
-import openmc
 from numpy import sqrt
 from numpy import log as ln
-from tqdm import tqdm
+import openmc
 MeV = 1E6
 # debugging tools
 sdir = lambda x: [i for i in dir(x) if '__' not in i]
@@ -14,10 +18,11 @@ import matplotlib.pyplot as plt
 plot_tab = lambda tab: plt.plot(*[getattr(tab, ax) for ax in 'xy'])
 haskey = lambda dict_instance, key: key in dict_instance.keys()
 
-######################### frequently referenced table for interpreting #################################
+######################### frequently referenced table for interpreting openmc data #####################
 from openmc.data.reaction import REACTION_NAME
 from openmc.data.endf import SUM_RULES
 from openmc.data import NATURAL_ABUNDANCE, atomic_mass, ATOMIC_NUMBER
+from openmc.data import INTERPOLATION_SCHEME
 
 MT_to_nuc_num = {
     2:(0, 0),
@@ -130,6 +135,182 @@ for i in range(875, 891):
     MT_to_nuc_num[i] = tuple([*MT_to_nuc_num[16], i-875])
 MT_to_nuc_num[891] = MT_to_nuc_num[16]
 
+# package all of the nuclear-data related variables into a single dictionary, so that when testing, it becomes easier to import all of them at once from misc_library.
+openmc_variable = {"REACTION_NAME":REACTION_NAME, "SUM_RULES":SUM_RULES,
+                    "NATURAL_ABUNDANCE":NATURAL_ABUNDANCE,
+                    "atomic_mass":atomic_mass, "ATOMIC_NUMBER":ATOMIC_NUMBER,
+                    "INTERPOLATION_SCHEME":INTERPOLATION_SCHEME}
+
+################################## The Integrate class #################################################
+class Integrate():
+    def __init__(self, func, verbose=True):
+        """
+        self.interpolation[i] describes the interpolation scheme between self.x[i-1] to self.x[i], using the scheme specified by
+            INTERPOLATION_SCHEME[self.interpolation[i]]
+        """
+        assert isinstance(func, openmc.data.Tabulated1D), "Must be a Tabulated1D object"
+        assert all(np.diff(func.x)>=0), "The data points must be stored in a manner so that the x values are monotonically increasing."
+        # there are n+1 boundaries, but only n cells. And whenever we use x1, we'll also use x2.
+        # Therefore the best way to store x and y is to store them as above: x1, x2, y1, y2.
+        self.func = func # pointer to the actual function, so that it can be used later.
+        self._interpolation = np.zeros(len(self.func.x[:-1]), dtype=int) # n cells
+        for point, scheme_number in list(zip(func.breakpoints, func.interpolation))[::-1]:
+            self._interpolation[:point-1] = scheme_number # use an offset of -1 to describe the cell *before* it,
+        self._area = self._calculate_area_of_each_cell(self.func.x, self.func.y, self._interpolation)
+        self.verbose = verbose
+
+    def definite_integral(self, a, b):
+        """
+        Definite integral that handles an array of (a, b) vs a scalar pair of (a, b) in different manners.
+        The main difference is that (a, b) will be clipped back into range if it exceeds the recorded x-values' range in the array case;
+        while such treatment won't happen in the scalar case.
+        We might change this later to remove the problem of havin g
+        """
+        assert (np.diff([a,b], axis=0)>=0).all(), "Can only integrate in the positive direction."
+        if np.not_equal(np.clip(a, self.func.x.min(), self.func.x.max()), a).any():
+            if self.verbose:
+                print("Integration limit is below recorded range of x values! Clipping it back into range...")
+            a = np.clip(a, self.func.x.min(), self.func.x.max())
+        if np.not_equal(np.clip(b, self.func.x.min(), self.func.x.max()), b).any():
+            if self.verbose:
+                print("Integration limit is above recorded range of x values! Clipping it back into range...")
+            b = np.clip(b, self.func.x.min(), self.func.x.max())
+
+        # ugly bodge to silence the error
+        prev_divide_error_state = np.geterr()["divide"]
+
+        if isinstance(a, Iterable):
+            assert np.shape(a)==np.shape(b), "The dimension of (a) must match that of (b)"
+            assert ary(a).ndim==1, "Must be a flat 1D array"
+            np.seterr(divide="ignore")
+            answer = self._definite_integral_array(a, b)
+        else:
+            np.seterr(divide="ignore")
+            answer = self._definite_integral_scalar(a, b)
+
+        np.seterr(divide=prev_divide_error_state) # undo error silencing
+        return answer
+
+    def _definite_integral_array(self, a, b):
+        n = len(self.func.x)
+        x_array_2d = np.broadcast_to(self.func.x, [len(a), n]).T
+        more_than_a = np.less_equal(a, x_array_2d).T
+        less_than_b = np.less_equal(x_array_2d, b).T
+
+        l_edge_upper_bound_indices = np.argmax(more_than_a, axis=1) # find the index of the first included datapoint
+        r_edge_lower_bound_indices = n-1-np.argmax(less_than_b[:, ::-1], axis=1) # find the index of the included datapoint
+
+        l_edge_x = ary([a, self.func.x[l_edge_upper_bound_indices]])
+        l_edge_y = ary([self.func(a), self.func.y[l_edge_upper_bound_indices]])
+        l_edge_scheme = self._interpolation[np.clip(l_edge_upper_bound_indices, 0, n-2, dtype=int)]
+
+        r_edge_x = ary([self.func.x[r_edge_lower_bound_indices], b])
+        r_edge_y = ary([self.func.y[r_edge_lower_bound_indices], self.func(b)])
+        r_edge_scheme = self._interpolation[np.clip(r_edge_lower_bound_indices, 0, n-2, dtype=int)]
+
+        l_edge_area, r_edge_area = np.zeros(len(a)), np.zeros(len(a))
+        for scheme_number in INTERPOLATION_SCHEME.keys(): # loop 5 times (x2 area calculations per loop) to get the l/r edges areas
+            matching_l = l_edge_scheme==scheme_number
+            matching_r = l_edge_scheme==scheme_number
+            l_edge_area[matching_l] = getattr(self, "area_scheme_"+str(scheme_number))(*l_edge_x.T[matching_l].T, *l_edge_y.T[matching_l].T)
+            r_edge_area[matching_r] = getattr(self, "area_scheme_"+str(scheme_number))(*r_edge_x.T[matching_r].T, *r_edge_y.T[matching_r].T)
+
+        central_area = np.zeros(len(a))
+        for new_ind, (start_ind, end_ind) in enumerate(ary([l_edge_upper_bound_indices, r_edge_lower_bound_indices]).T):
+            central_area[new_ind] = self._area[start_ind: end_ind].sum()
+            if end_ind<start_ind:
+                central_area[new_ind] = -self._area[start_ind-1 : np.clip(end_ind-1, 0, None, dtype=int) : -1].sum()
+
+        return l_edge_area+central_area+r_edge_area
+
+    def _definite_integral_scalar(self, a, b):
+        """
+        Re-calculates from scratch, the area of all of the cells enclosed by the interval [a, b], and then sums that up.
+
+        Parameters
+        ----------
+        a : starting x-coordinate of the integral
+        b : ending x-coordinate of the integral
+        """
+        enveloped_datapoints = np.logical_and(a<=self.func.x, self.func.x<=b) # numpy boolean mask
+        n = enveloped_datapoints.sum()+1
+        is_last_point_included = enveloped_datapoints[-1]
+        x_, y_, interpolation_ = np.zeros(n+1), np.zeros(n+1), np.zeros(n, dtype=int)
+        interpolation_[1:(-1*is_last_point_included)] = self._interpolation[enveloped_datapoints[:-1]]
+        if is_last_point_included:
+            interpolation_[-1] = self._interpolation[-1]
+        interpolation_[0] = self._interpolation[np.clip(np.argmax(enveloped_datapoints)-1, 0, None, dtype=int)] # use the interpolation scheme of the cell to the LEFT of the first enveloped data point.
+        x_[1:-1], y_[1:-1] = self.func.x[enveloped_datapoints], self.func.y[enveloped_datapoints]
+        x_[0], x_[-1] = a, b
+        y_[0], y_[-1] = self.func(a), self.func(b)
+        return self._calculate_area_of_each_cell(x_, y_, interpolation_).sum()
+
+    @classmethod
+    def _calculate_area_of_each_cell(cls, x, y, interpolation):
+        """
+        Parameters
+        ----------
+        x : the list of x coordinates where the boundaries of the cells are. Length = n+1
+        y : the list of y coordinates, denoting the values of the. Length = n+1
+        interpolation : the list of interpolation schemes for each cell. Length = n.
+        
+        Returns
+        -------
+        area : Area of each cell. Length = n.
+        """
+        # for interpoloation_scheme in
+        areas = np.zeros(len(x[:-1]))
+        for scheme_number in INTERPOLATION_SCHEME.keys(): # loop through each type of interpolation scheme
+            matching_cells = interpolation==scheme_number # matching_cells is a boolean mask of len = n.
+            if matching_cells.sum()>0: # save time by avoiding unnecessary method calls. Don't know if this helps or not, need to test.
+                areas[matching_cells] = getattr(cls,
+                    "area_scheme_"+str(scheme_number))(x[:-1][matching_cells],
+                                                        x[1:][matching_cells],
+                                                        y[:-1][matching_cells],
+                                                        y[1:][matching_cells]) # x-left, x-right, y-left, y-right
+        return areas
+
+    @staticmethod
+    def area_scheme_1(x1, x2, y1, y2):
+        dx = x2 - x1
+        return y1 * dx
+
+    @staticmethod
+    def area_scheme_2(x1, x2, y1, y2):
+        dx, dy = x2-x1, y2-y1
+        return dy*dx/2 + y1*dx
+
+    @staticmethod
+    def area_scheme_3(x1, x2, y1, y2):
+        """
+        0<=x1<=x2
+        """
+        dx, dy = x2-x1, y2-y1
+        dlnx = ln(x2) - ln(x1)
+        # m = dy/dlnx
+        return y1*dx + dy*x2 - dy*np.nan_to_num(dx/dlnx, nan=x1, posinf=x1, neginf=x1)
+
+    @staticmethod
+    def area_scheme_4(x1, x2, y1, y2):
+        dx, dy = x2-x1, y2-y1
+        dlny = ln(y2) - ln(y1)
+        # m = dlny/dx
+        return np.nan_to_num(dy/dlny, nan=y1, posinf=y1, neginf=y1) * dx # nan_to_num is needed to take care of y2 = y1,
+        # which makes dy/dlny appraoch the value of y1. (since dlny-> 0 one order of magnitude faster than 1 dy->0)
+        # if dy is exactly zero, dy/dlny would've returned nan.
+        # if dy is slightly less, dy/dlny would've returned neginf.
+        # if dy is slightly more, dy/dlny would've returned posinf.
+
+    @staticmethod
+    def area_scheme_5(x1, x2, y1, y2):
+        dx, dy = x2-x1, y2-y1
+        dlnx, dlny = ln(x2) - ln(x1), ln(y2) - ln(y1)
+        m = dlny/dlnx
+        nan_replacement = x2**(m+1)*ln(x2) - x1**(m+1)*ln(x1)
+        diff_x_over_m_1 = np.nan_to_num((x2**(m+1) - x1**(m+1))/(m+1), nan=nan_replacement, posinf=nan_replacement, neginf=nan_replacement)
+        diff_x_over_m_1_over_x1_to_m = np.nan_to_num(diff_x_over_m_1/(x1**m), nan=0, posinf=0, neginf=0)
+        return y2*diff_x_over_m_1_over_x1_to_m
+
 ####################### functions used for reading and saving data######################################
 def load_endf_directories(folder_list):
     try:
@@ -162,15 +343,26 @@ def load_endf_directories(folder_list):
 
 def detabulate(tabulated_object):
     """
-    Convert a openmc.data.
+    Convert a openmc.data.tabulated_object into something json serialize-able.
     """
-    x = tabulated_object.x.tolist()
-    y = tabulated_object.y.tolist()
-    interpolation = []
-    for ind in range(1,len(x)):
-        mask = ind<tabulated_object.breakpoints # may need a little change because interpolation is supposed to have length = len(x)-1
-        interpolation.append( tabulated_object.interpolation[mask][0] ) # choose the leftmost section that has energy < the next breakpoint, and add that section's corresponding interp scheme.
-    return dict(x=x, y=y, interpolation=interpolation)
+    scheme = np.zeros(len(tabulated_object.x)-1, dtype=int)
+    for point, scheme_number in list(zip(tabulated_object.breakpoints, tabulated_object.interpolation))[::-1]:
+        scheme[:point-1] = scheme_number # note the -1: it describes the interp-scheme of all cells *before* it.
+
+    return dict(x=tabulated_object.x.tolist(), y=tabulated_object.y.tolist(), interpolation=scheme.tolist())
+
+def tabulate(detabulated_dict):
+    """
+    parameters
+    ----------
+    detabulated_dict : should have 3 columns: "x" (list of len=n+1), "y" (list of len=n+1), "interpolation" (list of len=n).
+    """
+    interpolation_long = list(detabulated_dict["interpolation"]) # make a copy
+    # pad the interpolation_long to the lenght of n+1
+    interpolation_long.append(0) # outside of the specified data range, the interpolation scheme = N/A; use zero as placeholder for N/A.
+    breakpoints = sorted(np.argwhere(np.diff(interpolation_long)).flatten()+2)
+    interpolation = ary(interpolation_long)[ary(breakpoints)-2].tolist()
+    return openmc.data.Tabulated1D(detabulated_dict["x"], detabulated_dict["y"], breakpoints, interpolation)
 
 class EncoderOpenMC(json.JSONEncoder):
     def default(self, o):
