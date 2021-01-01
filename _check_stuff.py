@@ -21,6 +21,7 @@ Exploratory file, with the current objectives of:
 1. Figure out how to treat the unmatched E_max and E_min energy cases. (CHECK_LIMITS)
 2. Check to make sure that every library uses products[*].yield_.interpolation==2 (CHECK_YIELD)
 10. Write unittest for Integrate2 (which, BTW, should be renamed.)
+12. Compare with experimental results
 
 DONE: 
 # -2. Caclulate rname| volume| thicknesses
@@ -29,6 +30,7 @@ DONE:
 # 4. Speed up the integration by taking advantage of numpy
 # 9. Rewrite flux_convert to use detabulate instead of pkl
 # 8. Incorperate the Integrate class into flux_convert.py and _ReadData.py
+# 11. Create a preprocessing_data/ directory for universally used data (efficiency, material densities, etc.) to sit in.
 
 Deprecated jobs:
 # 6. change the count rates 0.0+/-nan to 0.0+/-0.0
