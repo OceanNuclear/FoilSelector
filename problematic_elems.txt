@@ -1,0 +1,58 @@
+#Ac-89 	 actinium
+#No exact match for Al, use closest match:Al99/Mg0.5/Si0.5 manual correction for the dilution may be needed.
+#Am-95 	 americium
+#Ar-18 	 argon
+##As-33 	 arsenic
+#At-85 	 astatine
+#Bh-107 	 bohrium
+#Bk-97 	 berkelium
+#Br-35 	 bromine
+##Cd-48 	 cadmium
+#Cf-98 	 californium
+#No exact match for Cl, use closest match:AgCl manual correction for the dilution may be needed.
+##Cm-96 	 curium
+#Cn-112 	 copernicium
+#Db-105 	 dubnium
+#Ds-110 	 darmstadtium
+#Es-99 	 einsteinium
+#No exact match for F, use closest match:CaF2 manual correction for the dilution may be needed.
+#Fl-114 	 flerovium
+#Fm-100 	 fermium
+#Fr-87 	 francium
+#H-1 	 hydrogen
+#He-2 	 helium
+#Hg-80 	 mercury
+#Hs-108 	 hassium
+#No exact match for I, use closest match:CsI manual correction for the dilution may be needed.
+#Kr-36 	 krypton
+#Lr-103 	 lawrencium
+#Lv-116 	 livermorium
+#Mc-115 	 moscovium
+#Md-101 	 mendelevium
+#No exact match for Mg, use closest match:Mg96/Al3/Zn1 manual correction for the dilution may be needed.
+#Mt-109 	 meitnerium
+##No exact match for N, use closest match:Fe/Cr22/Ni5.5/Mo3/N manual correction for the dilution may be needed.
+#Ne-10 	 neon
+#Nh-113 	 nihonium
+#No-102 	 nobelium
+#Np-93 	 neptunium
+#No exact match for O, use closest match:Al2O399.9 manual correction for the dilution may be needed.
+#Og-118 	 oganesson
+#Pa-91 	 protactinium
+#Pm-61 	 promethium
+#Po-84 	 polonium
+#Pu-94 	 plutonium
+#Ra-88 	 radium
+#Rf-104 	 rutherfordium
+#Rg-111 	 roentgenium
+#Rn-86 	 radon
+#No exact match for S, use closest match:ZnS manual correction for the dilution may be needed.
+##No exact match for Sb, use closest match:Pb96/Sb4 manual correction for the dilution may be needed.
+#Sg-106 	 seaborgium
+##Sr-38 	 strontium
+#Tc-43 	 technetium
+##Te-52 	 tellurium
+##No exact match for Ti, use closest match:Ti94.5/Al3/V2.5 manual correction for the dilution may be needed.
+#Tl-81 	 thallium
+#Ts-117 	 tennessine
+#Xe-54 	 xenon
