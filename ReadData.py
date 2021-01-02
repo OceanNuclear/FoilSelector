@@ -1,5 +1,6 @@
 # typical system/python stuff
 import os, sys, json
+import warnings
 from collections import OrderedDict
 from tqdm import tqdm
 # typical python numerical stuff
@@ -15,10 +16,13 @@ import uncertainties
 from uncertainties.core import Variable
 # custom modules
 from flux_convert import Integrate
-from misc_library import haskey, load_endf_directories, detabulate, EncoderOpenMC, HPGe_efficiency_curve_generator, MT_to_nuc_num
-
-FISSION_MTS = (18, 19, 20, 21, 22, 38)
-AMBIGUOUS_MT = (1, 3, 5, 18, 27, 101, 201, 202, 203, 204, 205, 206, 207, 649)
+from misc_library import (haskey,
+                         load_endf_directories,
+                         detabulate,
+                         EncoderOpenMC,
+                         HPGe_efficiency_curve_generator,
+                         MT_to_nuc_num, 
+                         FISSION_MTS, AMBIGUOUS_MT)
 
 photopeak_eff_curve = HPGe_efficiency_curve_generator('.physical_parameters/Absolute_photopeak_efficiencyMeV.csv')
 gamma_E = [20*1E3, 4.6*1E6] # detectable gamma energy range
@@ -69,17 +73,16 @@ def deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, mt):
     """
     Given the atomic number and mass number, get the daughter in the format of 'Ag109'.
     """
-    if 50<mt<=91:
-        element_symbol = openmc.data.ATOMIC_SYMBOL[parent_atomic_number]
-        product_mass = str(parent_atomic_mass)
-        return element_symbol+product_mass+f'_m{mt-50}'
-    element_symbol = openmc.data.ATOMIC_SYMBOL[parent_atomic_number + MT_to_nuc_num[mt][0]]
-    product_mass = str(parent_atomic_mass + MT_to_nuc_num[mt][1])
-    if len(MT_to_nuc_num[mt])>2 and MT_to_nuc_num[mt][2]>0: # if it indicates an excited state
-        excited_state = '_m'+str(MT_to_nuc_num[mt][2])
-        return element_symbol+product_mass+excited_state
+    if mt in MT_to_nuc_num.keys():
+        element_symbol = openmc.data.ATOMIC_SYMBOL[parent_atomic_number + MT_to_nuc_num[mt][0]]
+        product_mass = str(parent_atomic_mass + MT_to_nuc_num[mt][1])
+        if len(MT_to_nuc_num[mt])>2 and MT_to_nuc_num[mt][2]>0: # if it indicates an excited state
+            excited_state = '_m'+str(MT_to_nuc_num[mt][2])
+            return element_symbol+product_mass+excited_state
+        else:
+            return element_symbol+product_mass
     else:
-        return element_symbol+product_mass
+        return None
 
 def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True):
     """
@@ -92,10 +95,12 @@ def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True
     """
     appending_name_list, xs_list = [], []
     xs = rx_file.xs['0K']
-    if len(rx_file.products)==0:
-        name = deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, rx_file.mt)+'-MT='+str(rx_file.mt) # deduce_daughter_from_mt will return the ground state value
-        appending_name_list.append(name)
-        xs_list.append(detabulate(xs) if (not tabulated) else xs)
+    if len(rx_file.products)==0: # if no products are already available, then we can only assume there is only one product.
+        daughter_name = deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, rx_file.mt)
+        if daughter_name: # if the name is not None or False, i.e. a matching MT number is found.
+            name = daughter_name+'-MT='+str(rx_file.mt) # deduce_daughter_from_mt will return the ground state value
+            appending_name_list.append(name)
+            xs_list.append(detabulate(xs) if (not tabulated) else xs)
     else:
         for prod in rx_file.products:
             appending_name_list.append(prod.particle.replace('_e', '_m')+'-MT='+str(rx_file.mt))
@@ -104,7 +109,7 @@ def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True
             xs_list.append(detabulate(partial_xs) if (not tabulated) else partial_xs)
     return appending_name_list, xs_list
 
-def clean_up_missing_records(xs_dict, decay_dict):
+def clean_up_missing_records(xs_dict, decay_dict, verbose=False):
     """
     If there are entries in the xs_dict that gives a very unstable product (e.g. Ag_m22) as a primary product:
         so unstable such that there ISN'T a record of it in the decay_dict, then we can only assume that it will immediately decay to the ground state of that isotope as soon as it's produceds.
@@ -124,7 +129,8 @@ def clean_up_missing_records(xs_dict, decay_dict):
                     xs_dict[new_name] = xs_dict[parent_product_mt] # create entirely new xs entry
                 del xs_dict[parent_product_mt] # remove the old, unstable parent entry.
             else:
-                print("Non existant decay product found! {} is an expected product of {}-{}, but is not present in decay_dict.".foramt(product, parent, long_mt))
+                if verbose:
+                    print("Non-existent decay product found! {} is an expected product of {}-{}, but is not present in decay_dict.".format(product, parent, long_mt))
                 del xs_dict[parent_product_mt]
 
 def collapse_xs(xs_dict, gs_ary):
@@ -136,7 +142,7 @@ def collapse_xs(xs_dict, gs_ary):
     print("Collapsing the cross-sections to the correct group-structure...")
     for parent_product_mt, xs in tqdm(xs_dict.items()):
         I = Integrate(xs)
-        collapsed_sigma[parent_product_mt] = ary([I(*gs_ary[i])/np.diff(gs_ary[i]) for i in range(len(gs_ary))]).flatten()
+        collapsed_sigma[parent_product_mt] = I.definite_integral(*gs_ary.T)/np.diff(gs_ary, axis=1).flatten()
     return pd.DataFrame(collapsed_sigma).T
 
 if __name__=='__main__':
@@ -151,17 +157,21 @@ if __name__=='__main__':
     # First compile the decay records
     print("\nCompiling the decay_dict...")
     decay_dict = OrderedDict()
-    for file in tqdm(endf_file_list):
-        if repr(file).strip('<>').startswith('Radio'): # applicable to materials with (mf, mt) = (8, 457) file section
-            dec_f = Decay.from_endf(file)
-            decay_dict[str(dec_f.nuclide['atomic_number']).zfill(3)+dec_f.nuclide['name']] = extract_decay(dec_f)
+    with warnings.catch_warnings(record=True) as w_list:
+        for file in tqdm(endf_file_list):
+            if repr(file).strip('<>').startswith('Radio'): # applicable to materials with (mf, mt) = (8, 457) file section
+                dec_f = Decay.from_endf(file)
+                decay_dict[str(dec_f.nuclide['atomic_number']).zfill(3)+dec_f.nuclide['name']] = extract_decay(dec_f)
+    if w_list:
+        print(w_list[0].filename+", line {}, {}'s:".format(w_list[0].lineno, w_list[0].category))
+        for w in w_list:
+            print("    "+str(w.message))
     decay_dict = sort_and_trim_ordered_dict(decay_dict) # reorder it so that it conforms to the 
     
     # Save said decay records
     with open(os.path.join(sys.argv[-1], FULL_DECAY_INFO_FILE:='decay_radiation.json'), 'w') as f:
         print("\nSaving the decay spectra as {} ...".format(FULL_DECAY_INFO_FILE))
         json.dump(decay_dict, f, cls=EncoderOpenMC)
-    sys.exit()
 
     # turn decay records into number of counts
     print("\nCondensing each decay spectrum...")
@@ -192,7 +202,7 @@ if __name__=='__main__':
     xs_dict = sort_and_trim_ordered_dict(xs_dict)
 
 
-    print("\nCollapsing the cross-section to the group structure specified in 'gs.csv' and saving it as 'response.csv' ...")
+    print("\nCollapsing the cross-section to the group structure specified by 'gs.csv' and saving it as 'response.csv' ...")
     sigma_df = collapse_xs(xs_dict, gs)
     if SORT_BY_REACTION_RATE:
       sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]

@@ -135,15 +135,20 @@ for i in range(875, 891):
     MT_to_nuc_num[i] = tuple([*MT_to_nuc_num[16], i-875])
 MT_to_nuc_num[891] = MT_to_nuc_num[16]
 
-# package all of the nuclear-data related variables into a single dictionary, so that when testing, it becomes easier to import all of them at once from misc_library.
+FISSION_MTS = (18, 19, 20, 21, 22, 38)
+AMBIGUOUS_MT = (1, 3, 5, 18, 27, 101, 201, 202, 203, 204, 205, 206, 207, 649)
+
+########## package all of the nuclear-data related variables into a single dictionary,##################
+######### so that when testing, it becomes easier to import all of them at once from misc_library. #####
 openmc_variable = {"REACTION_NAME":REACTION_NAME, "SUM_RULES":SUM_RULES,
                     "NATURAL_ABUNDANCE":NATURAL_ABUNDANCE,
                     "atomic_mass":atomic_mass, "ATOMIC_NUMBER":ATOMIC_NUMBER,
-                    "INTERPOLATION_SCHEME":INTERPOLATION_SCHEME}
+                    "INTERPOLATION_SCHEME":INTERPOLATION_SCHEME,
+                    "FISSION_MTS":FISSION_MTS, "AMBIGUOUS_MT":AMBIGUOUS_MT}
 
 ################################## The Integrate class #################################################
 class Integrate():
-    def __init__(self, func, verbose=True):
+    def __init__(self, func, verbose=False):
         """
         self.interpolation[i] describes the interpolation scheme between self.x[i-1] to self.x[i], using the scheme specified by
             INTERPOLATION_SCHEME[self.interpolation[i]]
@@ -463,7 +468,7 @@ def exp(numbers):
     else:
         return np.exp(numbers)
 
-def HPGe_efficiency_curve_generator(working_dir, deg=4, cov=True):
+def HPGe_efficiency_curve_generator(file_location, deg=4, cov=True):
     '''
     according to Knoll (equation 12.32), polynomial fit in log-log space is the best.
     This program is trying to do the same.
@@ -479,8 +484,6 @@ def HPGe_efficiency_curve_generator(working_dir, deg=4, cov=True):
     publisher={Elsevier}
     }
     '''
-    import glob
-    file_location = glob.glob(os.path.join(working_dir, '*photopeak_efficiency*.csv'))[0]
     datapoints = pd.read_csv(file_location)
     assert "energ" in datapoints.columns[0].lower(), "The file must contain a header. Energy (eV/MeV) has to be placed in the first column"
     E, eff = datapoints.values.T[:2]

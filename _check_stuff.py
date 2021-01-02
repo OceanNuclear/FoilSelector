@@ -1,27 +1,28 @@
 import openmc.data
-from ReadData import welcome_message
+from misc_library import load_endf_directories
 import sys
 from matplotlib import pyplot as plt
 import numpy as np
 import json
-with open('ChipIR/all_mts.json') as f:
-    all_mts = json.load(f)
 sdir = lambda x: [i for i in dir(x) if '__' not in i]
 plot_tab = lambda tab, **kwargs: plt.plot(*[getattr(tab, ax) for ax in 'xy'], **kwargs)
 plot_delta = lambda E, height, dE, **kwargs: plt.plot([E-dE/2, E, E+dE/2], [0, height, 0], **kwargs)
 haskey = lambda dict_instance, key: key in dict_instance.keys()
 from collections import defaultdict
-FISSION_MTS = (18, 19, 20, 21, 22, 38)
+from  misc_library import openmc_variable
+vars().update(openmc_variable)
 """
-Following the workflow:
-8.5 redo with faster and larger library.
+This is a data exploratory file.
+
+OBJECTIVES:
+# 8.5 redo with faster and larger library.
+7. use the extract_xs_endf executable from FISPACT
+    https://fispact.ukaea.uk/wiki/Reaction_extract
 -1. Plot the gamma peaks and find overlaps
-Exploratory file, with the current objectives of:
-7. use the extract_xs executable from FISPACT
-1. Figure out how to treat the unmatched E_max and E_min energy cases. (CHECK_LIMITS)
-2. Check to make sure that every library uses products[*].yield_.interpolation==2 (CHECK_YIELD)
-10. Write unittest for Integrate2 (which, BTW, should be renamed.)
 12. Compare with experimental results
+10. Write unittest for Integrate2 (which, BTW, should be renamed.)
+2. Check to make sure that every library uses products[*].yield_.interpolation==2 (CHECK_YIELD)
+    And then write a new function that multiplies the "total" onto the "yield" to accurately obtain the "partial" when the yield_.interpolation==2.
 
 DONE: 
 # -2. Caclulate rname| volume| thicknesses
@@ -31,17 +32,21 @@ DONE:
 # 9. Rewrite flux_convert to use detabulate instead of pkl
 # 8. Incorperate the Integrate class into flux_convert.py and _ReadData.py
 # 11. Create a preprocessing_data/ directory for universally used data (efficiency, material densities, etc.) to sit in.
+# 2.5 Check products[*].yield_.y<=1.0 (CHECK_YIELD)
+    # note that sometimes yield > unity. And I don't know why. I'm just living with it like this for the moment.
+# 1. Figure out how to treat the unmatched E_max and E_min energy cases. (CHECK_LIMITS) # Just let them be.
 
 Deprecated jobs:
 # 6. change the count rates 0.0+/-nan to 0.0+/-0.0
+
 """
 
 CHECK_MAX_E = False
-CHECK_YIELD = False
+CHECK_YIELD = True
 CHECK_LIMITS = True
 CHECK_DECAY_CONT = False
 if __name__=='__main__':
-    endf_file_list = welcome_message()
+    endf_file_list = load_endf_directories(sys.argv[1:])
     if any([CHECK_MAX_E, CHECK_YIELD, CHECK_LIMITS]) :
         reactions = {f.gnd_name : openmc.data.IncidentNeutron.from_endf(f).reactions for f in endf_file_list if 'Incident' in repr(f)}
     if CHECK_DECAY_CONT:
@@ -75,9 +80,9 @@ if __name__=='__main__':
                     assert hasattr(prod, 'yield_'), f"This product {prod} doesn't have a yield!"
                     interpolation = prod.yield_.interpolation
                     if not np.equal(interpolation, 2).all():
-                        print("interpolation scheme != 2 at ", f"{gnd_name} [MT={mt}]")
-                    # if '_' in prod.particle :
-                    #     print(gnd_name, mt, prod.particle)
+                        print(f"{gnd_name} {mt=} {prod.particle} interpolation scheme = {set(interpolation)} != (2) at ")
+                    if (prod.yield_.y>1.0).any():
+                        print(f"{gnd_name} {mt=} {prod.particle} has maximum yield={prod.yield_.y.max()}>1!")
                     # if prod.emission_mode != "prompt":
                     #     print(gnd_name, f"MT={mt}", "has emission mode = ", prod.emission_mode)
 
@@ -94,9 +99,11 @@ if __name__=='__main__':
                     continue
 
                 for func in ['min', 'max']:
-                    extrema = ([getattr(tabulated, func)() for tabulated in [xs.x, *[prod.yield_.x for prod in r_dict[mt].products]]])
-                    if not np.isclose(extrema[0], extrema[1:]).all():
-                        print(gnd_name, mt, extrema)
+                    extrema = {"total": getattr(xs.x, func)()}
+                    for prod in r_dict[mt].products:
+                        extrema[prod.particle] = getattr(prod.yield_.x, func)()
+                    if not np.isclose(list(extrema.values())[0], list(extrema.values())[1:]).all():
+                        print(gnd_name, f"{mt=}", func, extrema)
                     # if not np.isclose(yield_x.min(), xs_x.min()):
                     #     print(gnd_name, f"MT={mt} has mismatched {prod} energy range wrt. its xs,", yield_x.min(), xs_x.min())
                     # if not np.isclose(yield_x.max(), xs_x.max()):

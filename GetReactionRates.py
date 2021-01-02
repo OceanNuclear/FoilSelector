@@ -1,3 +1,6 @@
+import json
+import sys, os
+from tqdm import tqdm
 import openmc
 from numpy import array as ary
 from numpy import log as ln
@@ -7,8 +10,6 @@ if (DEV_MODE:=False):
     from matplotlib import pyplot as plt
 import uncertainties
 from uncertainties.core import Variable
-import json
-import sys, os
 import pandas as pd
 from collections import namedtuple, OrderedDict
 from misc_library import haskey, unserialize_dict
@@ -166,7 +167,9 @@ if __name__=='__main__':
     sigma_df = pd.read_csv(os.path.join(sys.argv[-1], 'response.csv'), index_col=[0])
 
     detected_counts_per_parent_material_nuclide = {}
-    for parent_product_mt in sigma_df.index:
+
+    print("Calculating the expected number of photopeak counts")
+    for parent_product_mt in tqdm(sigma_df.index):
         product = parent_product_mt.split('-')[1]
         detected_counts_per_parent_material_nuclide[parent_product_mt] = [{
                     'pathway': '-'.join(subchain.names),
@@ -189,7 +192,9 @@ if __name__=='__main__':
     population = population[population['total gamma counts per primary product']>0.0] # keeping only those which aren't zeor, negative or nan.
     # select the default materials and get its relevant parameters
     default_material, partial_number_density = [], []
-    for parent_product_mt in population.index:
+
+    print("Selecting the default mateiral to be used")
+    for parent_product_mt in tqdm(population.index):
         parent = parent_product_mt.split('-')[0]
         if parent[len(extract_elem_from_string(parent)):]=='0': # take care of the species which are a MIXED natural composition of materials, e.g. Gd0
             parent = parent[:-1]

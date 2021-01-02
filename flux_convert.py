@@ -447,7 +447,7 @@ if __name__=='__main__':
         plt.plot(x, continuous_apriori(x), color='orange')
         plt.show()
 
-    print("2. Load in group structure--------------------------------------------------------------------------------------------------")
+    print("5. Load in group structure--------------------------------------------------------------------------------------------------")
     diff_gs_question = "Should a different group structure than the apriori_gs (entered above) be used?"
     diff_gs = ask_yn_question(diff_gs_question)
     
@@ -514,5 +514,5 @@ if __name__=='__main__':
 
     print("Preprocessing completed. The outputs are saved to:")
     print("group structure => gs.csv,")
-    print("flux vector => integrated_flux.csv, ")
+    print("flux vector => integrated_apriori.csv, ")
     print("continuous apriori (an openmc.data.Tabulated1D object) => continuous_apriori.csv")
