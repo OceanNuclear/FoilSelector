@@ -15,12 +15,24 @@ vars().update(openmc_variable)
 This is a data exploratory file.
 
 OBJECTIVES:
-# 8.5 redo with faster and larger library.
+10. Write unittest for Integrate
+-1. Plot the gamma peaks and find overlaps
+
 7. use the extract_xs_endf executable from FISPACT
     https://fispact.ukaea.uk/wiki/Reaction_extract
--1. Plot the gamma peaks and find overlaps
-12. Compare with experimental results
-10. Write unittest for Integrate2 (which, BTW, should be renamed.)
+    Find out if I'm misusing extract_xs_endf
+        ( record clearly exists (grep '10  5 3107' /home/ocean/Documents/PhD/FoilSelector/TENDL/gxs-1102/Au197g.asc) )
+Write bash script/Python script combination that uses extract_xs_endf
+    Create the following files:
+    aafiles points to aafluxes
+    aafluxes is a dummy file with n-1 zeros, 1 1, 1 wall-load, 1 comment line.
+    bash file to call python file to get the entire list of reactions available in TENDL (turn _m1 into m, _m2 into n, ignore everyone else?) and put it into a file.
+    'extract_xs_endf Sb105-Sn105-MT=103 n 1102 Sb105 103 Sn105 aafiles'
+    bash file takes the 5th column of .out and then append it into the 'fispact-response.csv' horizontally; then delete the .out and .log file.
+    Convert flux into the relevant group structure and then save it as 'rebinned_flux.csv'.
+7.5 OR rewrite openmc to make it read higher than 30 MeV.
+
+12. Compare with experimental results: check dimensionality etc.
 2. Check to make sure that every library uses products[*].yield_.interpolation==2 (CHECK_YIELD)
     And then write a new function that multiplies the "total" onto the "yield" to accurately obtain the "partial" when the yield_.interpolation==2.
 
@@ -35,6 +47,7 @@ DONE:
 # 2.5 Check products[*].yield_.y<=1.0 (CHECK_YIELD)
     # note that sometimes yield > unity. And I don't know why. I'm just living with it like this for the moment.
 # 1. Figure out how to treat the unmatched E_max and E_min energy cases. (CHECK_LIMITS) # Just let them be.
+# 8.5 redo with faster and larger library.
 
 Deprecated jobs:
 # 6. change the count rates 0.0+/-nan to 0.0+/-0.0
