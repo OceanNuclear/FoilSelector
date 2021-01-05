@@ -11,6 +11,7 @@ import pandas as pd
 from numpy import sqrt
 from numpy import log as ln
 import openmc
+import contextlib
 MeV = 1E6
 # debugging tools
 sdir = lambda x: [i for i in dir(x) if '__' not in i]
@@ -146,7 +147,17 @@ openmc_variable = {"REACTION_NAME":REACTION_NAME, "SUM_RULES":SUM_RULES,
                     "INTERPOLATION_SCHEME":INTERPOLATION_SCHEME,
                     "FISSION_MTS":FISSION_MTS, "AMBIGUOUS_MT":AMBIGUOUS_MT}
 
-################################## The Integrate class #################################################
+################################# The Integrate class #################################################
+class SilenceNumpyDivisionError(contextlib.ContextDecorator):
+    def __enter__(self):
+        self.prev_divide_error_state = np.geterr()["divide"] # record current state of error handling style
+        np.seterr(divide="ignore") # force ignore all division errors
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        np.seterr(divide=self.prev_divide_error_state) # undo error silencing
+        return self
+
 class Integrate():
     def __init__(self, func, verbose=False):
         """
@@ -164,6 +175,7 @@ class Integrate():
         self._area = self._calculate_area_of_each_cell(self.func.x, self.func.y, self._interpolation)
         self.verbose = verbose
 
+    @SilenceNumpyDivisionError()
     def definite_integral(self, a, b):
         """
         Definite integral that handles an array of (a, b) vs a scalar pair of (a, b) in different manners.
@@ -181,20 +193,12 @@ class Integrate():
                 print("Integration limit is above recorded range of x values! Clipping it back into range...")
             b = np.clip(b, self.func.x.min(), self.func.x.max())
 
-        # ugly bodge to silence the error
-        prev_divide_error_state = np.geterr()["divide"]
-
         if isinstance(a, Iterable):
             assert np.shape(a)==np.shape(b), "The dimension of (a) must match that of (b)"
             assert ary(a).ndim==1, "Must be a flat 1D array"
-            np.seterr(divide="ignore")
-            answer = self._definite_integral_array(a, b)
+            return self._definite_integral_array(ary(a), ary(b))
         else:
-            np.seterr(divide="ignore")
-            answer = self._definite_integral_scalar(a, b)
-
-        np.seterr(divide=prev_divide_error_state) # undo error silencing
-        return answer
+            return self._definite_integral_scalar(a, b)
 
     def _definite_integral_array(self, a, b):
         n = len(self.func.x)
