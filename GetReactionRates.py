@@ -1,5 +1,5 @@
 import json
-import sys, os
+import sys, os, time
 from tqdm import tqdm
 import openmc
 from numpy import array as ary
@@ -141,6 +141,10 @@ def check_differences(decay_constants):
     difference_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)[0]
     return abs(difference_matrix)[np.triu_indices(len(decay_constants), 1)]
 
+def tprint(msg):
+    time_mark = time.time() - prog_start_time
+    print("\n[t=+{:2.2f}s]".format(time_mark)+msg)
+
 # PARAMETERS
 IRRADIATION_DURATION = 3600 # spread the irradiation power over the entire course of this length
 TRANSIT_DURATION = 5*60
@@ -155,10 +159,11 @@ PHYSICAL_PROP_FILE = ".physical_parameters/elemental_frac_isotopic_frac_physical
 CONDENSED_DECAY_INFO_FILE = 'decay_counts.json'
 
 if __name__=='__main__':
+    prog_start_time = time.time()
     assert os.path.exists(PHYSICAL_PROP_FILE), "Expected physical property file at ./{}".format(os.path.relpath(PHYSICAL_PROP_FILE))
     apriori_flux, apriori_fluence = get_apriori(sys.argv[-1], IRRADIATION_DURATION)
 
-    print(f"Reading ./{os.path.relpath(PHYSICAL_PROP_FILE)} to be interpreted as the physical parameters")
+    tprint(f"Reading ./{os.path.relpath(PHYSICAL_PROP_FILE)} to be interpreted as the physical parameters.")
     physical_prop = pd.read_csv(PHYSICAL_PROP_FILE, index_col=[0])
 
     with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE), 'r') as f:
@@ -166,20 +171,14 @@ if __name__=='__main__':
         decay_dict = unserialize_dict(decay_dict)
     sigma_df = pd.read_csv(os.path.join(sys.argv[-1], 'response.csv'), index_col=[0])
 
-    detected_counts_per_parent_material_nuclide = {}
-
-    print("Calculating the expected number of photopeak counts")
-    for parent_product_mt in tqdm(sigma_df.index):
-        product = parent_product_mt.split('-')[1]
-        detected_counts_per_parent_material_nuclide[parent_product_mt] = [{
+    detected_counts_per_primary_product, total_counts_per_primary_product = {}, {}
+    tprint("Calculating the expected number of photopeak counts for each type of product created:")
+    product_set = set([parent_product_mt.split("-")[1] for parent_product_mt in sigma_df.index])
+    for product in tqdm(product_set):
+        detected_counts_per_primary_product[product] = [{
                     'pathway': '-'.join(subchain.names),
-                    # 'counts':Bateman_num_decays_factorized(subchain.branching_ratios, subchain.decay_constants,
-                    #         IRRADIATION_DURATION,
-                    #         IRRADIATION_DURATION+TRANSIT_DURATION,
-                    #         IRRADIATION_DURATION+TRANSIT_DURATION+MEASUREMENT_DURATION,
-                    #         # DEBUG=True,
-                    #         )*subchain.countable_photons,
                             # (# of photons detected per nuclide n decayed) = (# of photons detected per decay of nuclide n) * lambda_n * \int(population)dT
+                    # 'counts':Bateman_num_decays_factorized(subchain.branching_ratios, subchain.decay_constants,
                     'counts':np.product(subchain.branching_ratios[1:])*
                             Bateman_mat_exp_num_decays(subchain.decay_constants, 
                             IRRADIATION_DURATION,
@@ -187,19 +186,22 @@ if __name__=='__main__':
                             IRRADIATION_DURATION+TRANSIT_DURATION+MEASUREMENT_DURATION
                             )*subchain.countable_photons,
                     } for subchain in linearize_decay_chain(build_decay_chain(product, decay_dict))]
+        total_counts_per_primary_product[product] = sum([path["counts"] for path in detected_counts_per_primary_product[product]])
     # get the production rate for each reaction
     population = pd.DataFrame({'production of primary product per parent atom':(sigma_df.values*BARN) @ apriori_fluence}, index=sigma_df.index)
     # add the total counts of gamma photons detectable per primary product column
-    population['total gamma counts per primary product'] = [sum([path['counts'] for path in detected_counts_per_parent_material_nuclide[i]]) for i in sigma_df.index]
+    tprint("Matching the reactions to their decay product count...")
+    population['total gamma counts per primary product'] = [total_counts_per_primary_product[parent_product_mt.split("-")[1]] for parent_product_mt in sigma_df.index]
     # add the final counts accumulated per parent atom column
     population['final counts accumulated per parent atom'] = population['total gamma counts per primary product'] * population['production of primary product per parent atom']
     # sort by activity and remove all nans
+    tprint("Re-ordering the dataframe by the final counts accumulated per parent atom and removing the entries with zero counts...")
     population.sort_values('final counts accumulated per parent atom', inplace=True, ascending=False)
-    population = population[population['total gamma counts per primary product']>0.0] # keeping only those which aren't zeor, negative or nan.
+    population = population[population['total gamma counts per primary product']>0.0] # keeping only those with positive counts.
     # select the default materials and get its relevant parameters
     default_material, partial_number_density = [], []
 
-    print("Selecting the default mateiral to be used")
+    tprint("Selecting the default material to be used:")
     for parent_product_mt in tqdm(population.index):
         parent = parent_product_mt.split('-')[0]
         if parent[len(extract_elem_from_string(parent)):]=='0': # take care of the species which are a MIXED natural composition of materials, e.g. Gd0
@@ -207,9 +209,9 @@ if __name__=='__main__':
         if ENRICH_TO_100_PERCENT: # allowing enrichment means 100% of that element being made of the specified isotope only
             parent = extract_elem_from_string(parent)
         if parent not in physical_prop.columns:
-            # if there isn't a parent mateiral
+            # if there isn't a parent material
             default_material.append('Missing (N/A)')
-            partial_number_density.append(float('nan'))
+            partial_number_density.append(0.0)
             continue
         material_info = pick_material(parent, physical_prop)
         default_material.append(material_info.name+" ("+material_info['Formula']+")")
@@ -219,7 +221,9 @@ if __name__=='__main__':
     population["partial number density (cm^-3)"] = partial_number_density
     population["gamma counts per volume of foil (cm^-3)"] = population["final counts accumulated per parent atom"] * population["partial number density (cm^-3)"]
     population["gamma counts per unit thickness of foil (mm^-1)"] = population["gamma counts per volume of foil (cm^-3)"] * FOIL_AREA * MM_CM# assuming the area = Foil Area
+    tprint("Re-ordering the dataframe according to the counts per volume...")
     population.sort_values("gamma counts per volume of foil (cm^-3)", inplace=True, ascending=False) # sort again, this time according to the required volume
+    tprint(f"Saving as 'counts.csv'...")
     population.to_csv(os.path.join(sys.argv[-1], 'counts.csv'), index_label='rname')
 
     # save parameters at the end.
@@ -233,3 +237,4 @@ if __name__=='__main__':
         CONDENSED_DECAY_INFO_FILE = CONDENSED_DECAY_INFO_FILE,
         )
     )
+    tprint("Run complete. See results in 'counts.csv'.")

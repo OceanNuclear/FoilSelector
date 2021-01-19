@@ -128,42 +128,48 @@ def collapse_xs(xs_dict, gs_ary):
     by averaging the cross-section within each bin.
     """
     collapsed_sigma = dict()
-    print("Collapsing the cross-sections to the correct group-structure...")
+    print("Collapsing the cross-sections to the desired group-structure...")
     for parent_product_mt, xs in tqdm(xs_dict.items()):
         # perform the integration
         I = Integrate(xs)
         sigma = I.definite_integral(*gs_ary.T)/np.diff(gs_ary, axis=1).flatten()
 
-        # # get the strings to construct the key
-        # parent, product, mt_long = parent_product_mt.split("-")
-        # mt = mt_long[3:] # remove the "MT=" at the beginning
-        # # find all matching keys
-        # preexisting_sigma = [key for key in collapsed_sigma if key.startswith(parent+"-"+product)]
-        # for key in preexisting_sigma:
-        #     sigma_old = collapsed_sigma.pop(key)
-        #     parent, product, mt_long = key.split("-") # open the key up and take out the mt number(s) string.
-        #     mt_old = mt_long[3:].strip("()")
-
-        #     mt = mt_old+","+mt # append your new mt here.
-        #     sigma += sigma_old
-        # parent_product_mt = "{}-{}-MT=({})".format(parent, product, mt)
-
         collapsed_sigma[parent_product_mt] = sigma
     return pd.DataFrame(collapsed_sigma).T
 
 def merge_identical_parent_products(sigma_df):
-    parent_product_all = set("-".join(i.split("-")[:2]) for i in sigma_df.index)
+    # get the parent_product string and mt number string as two list, corresponding to each row in the sigma_df.
+    parent_product_list, mt_list = [], []
+    for parent_product_mt in sigma_df.index:
+        parent_product_list.append("-".join(parent_product_mt.split("-")[:2]))
+        mt_list.append(parent_product_mt.split("=")[1])
+    parent_product_list, mt_list = ary(parent_product_list), ary(mt_list) # make them into array to make them indexible.
+
+    partial_reaction_array = sigma_df.values
+    parent_product_all = ordered_set(parent_product_list)
+
+    sigma_unique = {}
     print("\nCondensing the sigma_df dataframe to merge together reactions with identical (parent, product) pairs...")
     for parent_product in tqdm(parent_product_all):
-        merged_sigma = np.zeros(len(sigma_df.columns))
-        mt_list = []
-        for parent_product_mt in sigma_df.index:
-            if parent_product_mt.startswith(parent_product):
-                merged_sigma += sigma_df.drop(parent_product_mt).values
-                mt_list.append(parent_product_mt.split('=')[1])
-        new_key = parent_product+"-MT=({})".format(",".join(mt_list))
-        sigma_df[mt_list] = merged_sigma
-    # return sigma_df # don't actually need to return anything.
+        matching_reactions = parent_product_list==parent_product
+        mt_name = "-MT=({})".format(",".join(mt_list[matching_reactions]))
+        sigma_unique[parent_product+mt_name] = partial_reaction_array[matching_reactions].sum(axis=0)
+    return pd.DataFrame(sigma_unique).T
+
+def ordered_set(sequence):
+    """
+    Get the sorted set, sorted according to the order of element first appearing in the sequence.
+    source:
+    http://www.martinbroadhurst.com/removing-duplicates-from-a-list-while-preserving-order-in-python.html
+    date accessed website: 2021-01-19 11:44:23
+    """
+    seen = set()
+    return [x for x in sequence if not (x in seen or seen.add(x))]
+    # GENIUS!
+    # (x in seen) -> stop evaluating;
+    # (x not in seen) -> add x to seen -> bracket returns False
+    #   -> negated by "not" in front of bracket -> adds element to list
+    # This should be an O(n) operation.
 
 class MF10(object):
     def __getitem__(self, key):
@@ -266,7 +272,7 @@ if __name__=='__main__':
                 dec_f = Decay.from_endf(file)
                 decay_dict[name] = extract_decay(dec_f)
     if w_list:
-        print(w_list[0].filename+", line {}, {}'s:".format(w_list[0].lineno, w_list[0].category))
+        print(w_list[0].filename+", line {}, {}'s:".format(w_list[0].lineno, w_list[0].category.__name__))
         for w in w_list:
             print("    "+str(w.message))
     decay_dict = sort_and_trim_ordered_dict(decay_dict) # reorder it so that it conforms to the 
@@ -281,6 +287,10 @@ if __name__=='__main__':
     print("\nCondensing each decay spectrum...")
     for name, dec_file in tqdm(decay_dict.items()):
         condense_spectrum(dec_file)
+
+    with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'w') as f:
+        print("\nSaving the condensed decay information as {} ...".format(CONDENSED_DECAY_INFO_FILE))
+        json.dump(decay_dict, f, cls=EncoderOpenMC)
         
     # Then compile the Incident-neutron records
     print("\nCompiling the raw cross-section dictionary.")
@@ -317,18 +327,15 @@ if __name__=='__main__':
 
     print("\nCollapsing the cross-section to the group structure specified by 'gs.csv' and saving it as 'response.csv' ...")
     sigma_df = collapse_xs(xs_dict, gs)
-    merge_identical_parent_products(sigma_df)
+    if not (SHOW_SEPARATE_MT_REACTION_RATES:=False):
+        sigma_df = merge_identical_parent_products(sigma_df)
 
     if SORT_BY_REACTION_RATE:
         sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]
     sigma_df.to_csv(os.path.join(sys.argv[-1], 'response.csv'))
     # saves the number of radionuclide produced per (neutron cm^-2) of fluence flash-irradiated in that given bin.
-    
-    with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'w') as f:
-        print("\nSaving the condensed decay information as {} ...".format(CONDENSED_DECAY_INFO_FILE))
-        json.dump(decay_dict, f, cls=EncoderOpenMC)
 
     # save parameters at the end.
-    parameters_dict = dict(HPGe_eff_file=HPGe_eff_file, gamma_E=gamma_E, FISSION_MTS=FISSION_MTS, AMBIGUOUS_MT=AMBIGUOUS_MT, SORT_BY_REACTION_RATE=SORT_BY_REACTION_RATE)
+    parameters_dict = dict(HPGe_eff_file=HPGe_eff_file, gamma_E=gamma_E, FISSION_MTS=FISSION_MTS, AMBIGUOUS_MT=AMBIGUOUS_MT, SORT_BY_REACTION_RATE=SORT_BY_REACTION_RATE, SHOW_SEPARATE_MT_REACTION_RATES=SHOW_SEPARATE_MT_REACTION_RATES)
     parameters_dict.update({sys.argv[0]+" argv": sys.argv[1:]})
     save_parameters_as_json(sys.argv[-1], parameters_dict)
