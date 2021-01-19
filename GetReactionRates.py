@@ -6,20 +6,21 @@ from numpy import array as ary
 from numpy import log as ln
 from numpy import sqrt
 import numpy as np
-if (DEV_MODE:=False):
-    from matplotlib import pyplot as plt
 import uncertainties
 from uncertainties.core import Variable
 import pandas as pd
 from collections import namedtuple, OrderedDict
 from misc_library import haskey, unserialize_dict
-from misc_library import (  get_fraction,
+from misc_library import (  get_apriori,
+                            get_fraction,
                             pick_material,
                             get_elemental_fractions,
+                            save_parameters_as_json,                            
                             extract_elem_from_string,
                             get_natural_average_atomic_mass, 
                             convert_elemental_to_isotopic_fractions,
-                            get_average_atomic_mass_from_isotopic_fractions)
+                            get_average_atomic_mass_from_isotopic_fractions,
+                            Bateman_mat_exp_num_decays)
 
 def build_decay_chain(decay_parent, decay_dict, decay_constant_threshold=1E-23):
     """
@@ -144,20 +145,19 @@ def check_differences(decay_constants):
 IRRADIATION_DURATION = 3600 # spread the irradiation power over the entire course of this length
 TRANSIT_DURATION = 5*60
 MEASUREMENT_DURATION = 3600
-FOIL_AREA = 4 #cm^2
+FOIL_AREA = 10 # cm^2
 ENRICH_TO_100_PERCENT = False # allowing enrichment means 100% of that element being made of the specified isotope only
 
 BARN = 1E-24
-MM_CM= 0.1
+MM_CM = 0.1
 
 PHYSICAL_PROP_FILE = ".physical_parameters/elemental_frac_isotopic_frac_physical_property.csv"
 CONDENSED_DECAY_INFO_FILE = 'decay_counts.json'
 
 if __name__=='__main__':
-    assert os.path.exists(os.path.join(sys.argv[-1], 'integrated_apriori.csv')), "Output directory must already have integrated_apriori.csv for calculating the radionuclide populations."
     assert os.path.exists(PHYSICAL_PROP_FILE), "Expected physical property file at ./{}".format(os.path.relpath(PHYSICAL_PROP_FILE))
-    print("Reading integrated_apriori.csv as the fluence, i.e. total number of neutrons/cm^2/eV, summed over the IRRADIATION_DURATION = {}\n".format(IRRADIATION_DURATION))
-    apriori = pd.read_csv(os.path.join(sys.argv[-1], 'integrated_apriori.csv'))['value'].values # integrated_apriori.csv is a csv with header = value and number of rows = len(gs); no index.
+    apriori_flux, apriori_fluence = get_apriori(sys.argv[-1], IRRADIATION_DURATION)
+
     print(f"Reading ./{os.path.relpath(PHYSICAL_PROP_FILE)} to be interpreted as the physical parameters")
     physical_prop = pd.read_csv(PHYSICAL_PROP_FILE, index_col=[0])
 
@@ -173,20 +173,26 @@ if __name__=='__main__':
         product = parent_product_mt.split('-')[1]
         detected_counts_per_parent_material_nuclide[parent_product_mt] = [{
                     'pathway': '-'.join(subchain.names),
-                    'counts':Bateman_num_decays_factorized(subchain.branching_ratios, subchain.decay_constants,
+                    # 'counts':Bateman_num_decays_factorized(subchain.branching_ratios, subchain.decay_constants,
+                    #         IRRADIATION_DURATION,
+                    #         IRRADIATION_DURATION+TRANSIT_DURATION,
+                    #         IRRADIATION_DURATION+TRANSIT_DURATION+MEASUREMENT_DURATION,
+                    #         # DEBUG=True,
+                    #         )*subchain.countable_photons,
+                            # (# of photons detected per nuclide n decayed) = (# of photons detected per decay of nuclide n) * lambda_n * \int(population)dT
+                    'counts':np.product(subchain.branching_ratios[1:])*
+                            Bateman_mat_exp_num_decays(subchain.decay_constants, 
                             IRRADIATION_DURATION,
                             IRRADIATION_DURATION+TRANSIT_DURATION,
-                            IRRADIATION_DURATION+TRANSIT_DURATION+MEASUREMENT_DURATION,
-                            # DEBUG=True,
+                            IRRADIATION_DURATION+TRANSIT_DURATION+MEASUREMENT_DURATION
                             )*subchain.countable_photons,
-                            # (# of photons detected per nuclide n decayed) = (# of photons detected per decay of nuclide n) * lambda_n * \int(population)dT
                     } for subchain in linearize_decay_chain(build_decay_chain(product, decay_dict))]
     # get the production rate for each reaction
-    population = pd.DataFrame({'production rate of primary product per parent atom':(sigma_df.values*BARN) @ apriori}, index=sigma_df.index)
+    population = pd.DataFrame({'production of primary product per parent atom':(sigma_df.values*BARN) @ apriori_fluence}, index=sigma_df.index)
     # add the total counts of gamma photons detectable per primary product column
     population['total gamma counts per primary product'] = [sum([path['counts'] for path in detected_counts_per_parent_material_nuclide[i]]) for i in sigma_df.index]
     # add the final counts accumulated per parent atom column
-    population['final counts accumulated per parent atom'] = population['total gamma counts per primary product'] * population['production rate of primary product per parent atom']
+    population['final counts accumulated per parent atom'] = population['total gamma counts per primary product'] * population['production of primary product per parent atom']
     # sort by activity and remove all nans
     population.sort_values('final counts accumulated per parent atom', inplace=True, ascending=False)
     population = population[population['total gamma counts per primary product']>0.0] # keeping only those which aren't zeor, negative or nan.
@@ -201,6 +207,7 @@ if __name__=='__main__':
         if ENRICH_TO_100_PERCENT: # allowing enrichment means 100% of that element being made of the specified isotope only
             parent = extract_elem_from_string(parent)
         if parent not in physical_prop.columns:
+            # if there isn't a parent mateiral
             default_material.append('Missing (N/A)')
             partial_number_density.append(float('nan'))
             continue
@@ -212,4 +219,17 @@ if __name__=='__main__':
     population["partial number density (cm^-3)"] = partial_number_density
     population["gamma counts per volume of foil (cm^-3)"] = population["final counts accumulated per parent atom"] * population["partial number density (cm^-3)"]
     population["gamma counts per unit thickness of foil (mm^-1)"] = population["gamma counts per volume of foil (cm^-3)"] * FOIL_AREA * MM_CM# assuming the area = Foil Area
+    population.sort_values("gamma counts per volume of foil (cm^-3)", inplace=True, ascending=False) # sort again, this time according to the required volume
     population.to_csv(os.path.join(sys.argv[-1], 'counts.csv'), index_label='rname')
+
+    # save parameters at the end.
+    save_parameters_as_json(sys.argv[-1], dict(
+        IRRADIATION_DURATION=IRRADIATION_DURATION,
+        TRANSIT_DURATION=TRANSIT_DURATION,
+        MEASUREMENT_DURATION=MEASUREMENT_DURATION,
+        FOIL_AREA=FOIL_AREA,
+        ENRICH_TO_100_PERCENT=ENRICH_TO_100_PERCENT,
+        PHYSICAL_PROP_FILE = PHYSICAL_PROP_FILE,
+        CONDENSED_DECAY_INFO_FILE = CONDENSED_DECAY_INFO_FILE,
+        )
+    )

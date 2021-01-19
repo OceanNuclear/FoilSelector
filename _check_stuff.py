@@ -9,34 +9,44 @@ plot_tab = lambda tab, **kwargs: plt.plot(*[getattr(tab, ax) for ax in 'xy'], **
 plot_delta = lambda E, height, dE, **kwargs: plt.plot([E-dE/2, E, E+dE/2], [0, height, 0], **kwargs)
 haskey = lambda dict_instance, key: key in dict_instance.keys()
 from collections import defaultdict
-from  misc_library import openmc_variable
+from misc_library import openmc_variable
 vars().update(openmc_variable)
 """
 This is a data exploratory file.
 
 OBJECTIVES:
-10. Write unittest for Integrate
--1. Plot the gamma peaks and find overlaps
-
-7. use the extract_xs_endf executable from FISPACT
-    https://fispact.ukaea.uk/wiki/Reaction_extract
-    Find out if I'm misusing extract_xs_endf
-        ( record clearly exists (grep '10  5 3107' /home/ocean/Documents/PhD/FoilSelector/TENDL/gxs-1102/Au197g.asc) )
-Write bash script/Python script combination that uses extract_xs_endf
-    Create the following files:
-    aafiles points to aafluxes
-    aafluxes is a dummy file with n-1 zeros, 1 1, 1 wall-load, 1 comment line.
-    bash file to call python file to get the entire list of reactions available in TENDL (turn _m1 into m, _m2 into n, ignore everyone else?) and put it into a file.
-    'extract_xs_endf Sb105-Sn105-MT=103 n 1102 Sb105 103 Sn105 aafiles'
-    bash file takes the 5th column of .out and then append it into the 'fispact-response.csv' horizontally; then delete the .out and .log file.
-    Convert flux into the relevant group structure and then save it as 'rebinned_flux.csv'.
-7.5 OR rewrite openmc to make it read higher than 30 MeV.
-
 12. Compare with experimental results: check dimensionality etc.
 2. Check to make sure that every library uses products[*].yield_.interpolation==2 (CHECK_YIELD)
-    And then write a new function that multiplies the "total" onto the "yield" to accurately obtain the "partial" when the yield_.interpolation==2.
+16. Write Adder and Multiplier for Tabulated1D (to accurately obtain the "partial")
+-1. Plot the gamma peaks and find overlaps
+13. Fix scheme 5 (test fails frequently, need to print the errors in more detail to figure out where they're coming from.)
+17. Rewrite Foil and FoilSet with the SOLID principle (inheritence: CLOPEN)
+18. Clean up flux_convert.py?
 
+NOTE:
+    # note that sometimes yield > unity. And I don't know why. I'm just living with it like this for the moment.
+    # It is apparent that the (MF=10, MT!=5) files stores information that can also be extracted by multiplying the yield_ onto the MF=3 file's cross-section.
+        So there's no need to read all of the (MF=10, MT!=5) files.
+
+DONE in the past 3 days (2021-01-18 13:28:19):
+# What am I going to do with the other MF=10 files?
+# why doesn't clean_up_missing_records throw an error when adding tab1's of dfferent shapes?
+# 7.5 OR rewrite openmc to make it read higher than 30 MeV.
+# Big problem: The Au197m file gives the exact same info as the Au197 file!! Same reactions, same cross-sections, but openmc doesn't alert us of that!
+# Write bash script/Python script combination that uses extract_xs_endf
+#     Create the following files:
+#     aafiles points to aafluxes
+#     aafluxes is a dummy file with n-1 zeros, 1 1, 1 wall-load, 1 comment line.
+#     bash file to call python file to get the entire list of reactions available in TENDL (turn _m1 into m, _m2 into n, ignore everyone else?) and put it into a file.
+#     'extract_xs_endf Sb105-Sn105-MT=103 n 1102 Sb105 103 Sn105 aafiles'
+#     bash file takes the 5th column of .out and then append it into the 'fispact-response.csv' horizontally; then delete the .out and .log file.
+#     Convert flux into the relevant group structure and then save it as 'rebinned_flux.csv'.
+# Idea ignored since FISPACT has now been proven as useless
 DONE: 
+# 7. use the extract_xs_endf executable from FISPACT
+#     https://fispact.ukaea.uk/wiki/Reaction_extract
+#     Find out if I'm misusing extract_xs_endf
+#         ( record clearly exists (grep '10  5 3107' /home/ocean/Documents/PhD/FoilSelector/TENDL/gxs-1102/Au197g.asc) )
 # -2. Caclulate rname| volume| thicknesses
 # 3. Figure out how to treat continuous_flag=='both'/'continuous' distribution of gamma. (CHECK_DECAY_CONT)
 # 5. Change the decay_dict[...]['mode'] from [{"daughter":"Al27", "branching_ratio":1.0+/-0.0}] to {"Al27":1.0+/-0.0} and make the rest of the handling pretty.
@@ -45,13 +55,16 @@ DONE:
 # 8. Incorperate the Integrate class into flux_convert.py and _ReadData.py
 # 11. Create a preprocessing_data/ directory for universally used data (efficiency, material densities, etc.) to sit in.
 # 2.5 Check products[*].yield_.y<=1.0 (CHECK_YIELD)
-    # note that sometimes yield > unity. And I don't know why. I'm just living with it like this for the moment.
 # 1. Figure out how to treat the unmatched E_max and E_min energy cases. (CHECK_LIMITS) # Just let them be.
 # 8.5 redo with faster and larger library.
+# 10. Write unittest for Integrate
 
 Deprecated jobs:
 # 6. change the count rates 0.0+/-nan to 0.0+/-0.0
-
+# 16. To make it usable across many libraries, add a check to make sure the MF10MT5 reactions CORRESPONDS to and compliments at least one chopped off reaction?
+    Not needed because we can just expect the data to be stored in the correct way.
+# 15. If MF10, MT!=5 file is present, choose that over the "multiplying by the yield_" method for extracting the partial cross-section?
+    Nah, easier to just deal with just the yield without the branching if conditions.
 """
 
 CHECK_MAX_E = False

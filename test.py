@@ -64,7 +64,7 @@ class TestIntegratorEdgeCases(unittest.TestCase):
             self.assertEqual(getattr(I, "area_scheme_"+str(i))(0,0, 0,0), 0, "Make sure area=0 when x1 =0, y1 =0, dx=0, dy =0 for scheme={}".format(i))
             self.assertEqual(getattr(I, "area_scheme_"+str(i))(0,0, 0,1), 0, "Make sure area=0 when x1 =0, y1 =0, dx=0, dy!=0 for scheme={}".format(i))
         # testing the very specific case of slope = -1 when test = 1.
-        self.assertEqual(I.area_scheme_5(1,2, 2,1), 1*1*(ln(2)-ln(1)), "Scheme 5 should still work in the slope = -1 case.")
+        self.assertEqual(I.area_scheme_5(1,2, 2,1), 2*1*(ln(2)-ln(1)), "Scheme 5 should still work in the slope = -1 case.")
         # testing the dy=0, dx!=0 cases # algebraically only an issue in scheme 4 and 5.
         self.assertEqual(I.area_scheme_4(1,2, 1,1), 1, "Scheme 4 should still work when dy=0, y1!=0")
         self.assertEqual(I.area_scheme_4(1,2, 0,0), 0, "Scheme 4 should still work when dy=0, y1 =0")
@@ -84,7 +84,7 @@ class TestIntegratorEdgeCases(unittest.TestCase):
             self.assertListEqual(getattr(I, "area_scheme_"+str(i))(ary([0]),ary([0]), ary([0]),ary([0])).tolist(), [0], "Make sure area=0 when x1 =0, y1 =0, dx=0, dy =0 for scheme={}".format(i))
             self.assertListEqual(getattr(I, "area_scheme_"+str(i))(ary([0]),ary([0]), ary([0]),ary([1])).tolist(), [0], "Make sure area=0 when x1 =0, y1 =0, dx=0, dy!=0 for scheme={}".format(i))
         # testing the very specific case of slope = -1 when test = 1.
-        self.assertListEqual(I.area_scheme_5(ary([1]),ary([2]), ary([2]),ary([1])).tolist(), [1*1*(ln(2)-ln(1))], "Scheme 5 should still work in the slope = -1 case.")
+        self.assertListEqual(I.area_scheme_5(ary([1]),ary([2]), ary([2]),ary([1])).tolist(), [2*1*(ln(2)-ln(1))], "Scheme 5 should still work in the slope = -1 case.")
         # testing the dy=0, dx!=0 cases # algebraically only an issue in scheme 4 and 5.
         self.assertListEqual(I.area_scheme_4(ary([1]),ary([2]), ary([1]),ary([1])).tolist(), [1], "Scheme 4 should still work when dy=0, y1!=0")
         self.assertListEqual(I.area_scheme_4(ary([1]),ary([2]), ary([0]),ary([0])).tolist(), [0], "Scheme 4 should still work when dy=0, y1 =0")
@@ -128,12 +128,14 @@ class TestIntegratorAccuracy(unittest.TestCase):
         for range_x_low, range_x_upp in np.clip(np.cumsum(nprn.rand(8).reshape([-1,2]), axis=-1), 0, 1): # create four pairs
             upper = func_ana.x.min() + range_x_upp*(func_ana.x.max() - func_ana.x.min())
             lower = func_ana.x.min() + range_x_low*(func_ana.x.max() - func_ana.x.min())
-            self.assertAlmostEqual(I_analytical.definite_integral(lower, upper), slow_integrate(func_ana, lower, upper), msg="The analytically constructed function doesn't integrate properly using the formula given!")
+            self.assertAlmostEqual(I_analytical.definite_integral(lower, upper), slow_integrate(func_ana, lower, upper), places=4,
+                msg="The analytically constructed function doesn't integrate properly using the formula given!")
             self.break_func2 = func_ana, I_analytical
 
             upper = func_random.x.min() + range_x_upp*(func_random.x.max() - func_random.x.min())
             lower = func_random.x.min() + range_x_low*(func_random.x.max() - func_random.x.min())
-            self.assertAlmostEqual(I_random.definite_integral(lower, upper), slow_integrate(func_random, lower, upper), msg="The randomly constructed function doesn't integrate properly using the formula given!")
+            self.assertAlmostEqual(I_random.definite_integral(lower, upper), slow_integrate(func_random, lower, upper), places=4,
+                msg="The randomly constructed function doesn't integrate properly using the formula given!")
             self.break_func3 = func_random, I_random
             # self.assertAlmostEqual(I_random.definite_integral(lower, upper), slow_integrate(wrapped_func_scalar, lower, upper), "The definite integral of the randomly constructed function doesn't give the same result as if we integrate the wrapped function!")
 

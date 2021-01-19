@@ -371,6 +371,7 @@ if __name__=='__main__':
         apriori = np.hstack([apriori, apriori[-1]])
     continuous_apriori = Tabulated1D(E_values, apriori, breakpoints=[len(apriori),], interpolation=[scheme,])
 
+    # plot in per eV scale
     plt.plot(x:=np.linspace(min(E_values), max(E_values), num=200), continuous_apriori(x))
     plt.show()
     
@@ -421,7 +422,7 @@ if __name__=='__main__':
                 print(e)
         apriori = apriori * new_total_flux/total_flux
         continuous_apriori = Tabulated1D(E_values, apriori, breakpoints=[len(apriori)], interpolation=[scheme,])
-        total_flux = Integrate(continuous_apriori)(min(E_values), max(E_values))
+        total_flux = Integrate(continuous_apriori).definite_integral(min(E_values), max(E_values))
         plt.plot(x, continuous_apriori(x))
         plt.show()
     print(f"{total_flux = }")

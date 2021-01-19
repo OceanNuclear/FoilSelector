@@ -1,15 +1,17 @@
 # typical system/python stuff
 import os, sys, json
 import warnings
+from io import StringIO
 from collections import OrderedDict
 from tqdm import tqdm
 # typical python numerical stuff
 from numpy import array as ary; import numpy as np
 from numpy import log as ln
 import pandas as pd
+# from matplotlib import pyplot as plt
 # openmc stuff
 import openmc
-from openmc.data import IncidentNeutron, Decay, Evaluation
+from openmc.data import IncidentNeutron, Decay, Evaluation, ATOMIC_SYMBOL
 from openmc.data.reaction import REACTION_NAME
 # uncertainties
 import uncertainties
@@ -17,14 +19,18 @@ from uncertainties.core import Variable
 # custom modules
 from flux_convert import Integrate
 from misc_library import (haskey,
-                         load_endf_directories,
+                         # plot_tab,
+                         tabulate,
                          detabulate,
                          EncoderOpenMC,
-                         HPGe_efficiency_curve_generator,
                          MT_to_nuc_num, 
-                         FISSION_MTS, AMBIGUOUS_MT)
+                         load_endf_directories,
+                         FISSION_MTS, AMBIGUOUS_MT,
+                         HPGe_efficiency_curve_generator,
+                         save_parameters_as_json)
 
-photopeak_eff_curve = HPGe_efficiency_curve_generator('.physical_parameters/Absolute_photopeak_efficiencyMeV.csv')
+HPGe_eff_file = '.physical_parameters/Absolute_photopeak_efficiencyMeV.csv'
+photopeak_eff_curve = HPGe_efficiency_curve_generator(HPGe_eff_file)
 gamma_E = [20*1E3, 4.6*1E6] # detectable gamma energy range
 
 def sort_and_trim_ordered_dict(ordered_dict, trim_length=3):
@@ -77,12 +83,17 @@ def deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, mt):
         element_symbol = openmc.data.ATOMIC_SYMBOL[parent_atomic_number + MT_to_nuc_num[mt][0]]
         product_mass = str(parent_atomic_mass + MT_to_nuc_num[mt][1])
         if len(MT_to_nuc_num[mt])>2 and MT_to_nuc_num[mt][2]>0: # if it indicates an excited state
-            excited_state = '_m'+str(MT_to_nuc_num[mt][2])
+            excited_state = '_e'+str(MT_to_nuc_num[mt][2])
             return element_symbol+product_mass+excited_state
         else:
             return element_symbol+product_mass
     else:
         return None
+
+class Tab1DWithAddition(openmc.data.Tabulated1D):
+    def __add__(self, tab_like):
+        pass
+        return tab_like
 
 def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True):
     """
@@ -95,6 +106,8 @@ def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True
     """
     appending_name_list, xs_list = [], []
     xs = rx_file.xs['0K']
+    if isinstance(xs, openmc.data.ResonancesWithBackground):
+        xs = xs.background # When shrinking the group structure, this contains everything you need. The Resonance part of xs can be ignored (only matters for self-shielding.)
     if len(rx_file.products)==0: # if no products are already available, then we can only assume there is only one product.
         daughter_name = deduce_daughter_from_mt(parent_atomic_number, parent_atomic_mass, rx_file.mt)
         if daughter_name: # if the name is not None or False, i.e. a matching MT number is found.
@@ -103,35 +116,11 @@ def extract_xs(parent_atomic_number, parent_atomic_mass, rx_file, tabulated=True
             xs_list.append(detabulate(xs) if (not tabulated) else xs)
     else:
         for prod in rx_file.products:
-            appending_name_list.append(prod.particle.replace('_e', '_m')+'-MT='+str(rx_file.mt))
+            appending_name_list.append(prod.particle+'-MT='+str(rx_file.mt))
             partial_xs = openmc.data.Tabulated1D(xs.x, prod.yield_(xs.x) * xs.y,
                                                 breakpoints=xs.breakpoints, interpolation=xs.interpolation)
             xs_list.append(detabulate(partial_xs) if (not tabulated) else partial_xs)
     return appending_name_list, xs_list
-
-def clean_up_missing_records(xs_dict, decay_dict, verbose=False):
-    """
-    If there are entries in the xs_dict that gives a very unstable product (e.g. Ag_m22) as a primary product:
-        so unstable such that there ISN'T a record of it in the decay_dict, then we can only assume that it will immediately decay to the ground state of that isotope as soon as it's produceds.
-    """
-    print("Cleaning up the fast-decaying isotopes by assuming that they decay directly to the ground state:")
-    for parent_product_mt in tqdm(list(xs_dict.keys())):
-        if parent_product_mt.split('-')[1] not in decay_dict.keys(): # product not recorded as an isotope in decay_dict
-            parent, product, long_mt = parent_product_mt.split('-')
-            new_product = product.split('_')[0]
-            if new_product in decay_dict.keys():
-                new_name = '-'.join([parent, new_product, long_mt])
-                if new_name in xs_dict.keys():
-                    # merge with existing xs record
-                    xs2 = xs_dict[new_name] # expand out the xs2 in the next step. Assuming xs2 and xs would have the same group structure.
-                    xs_dict[new_name] = openmc.data.Tabulated1D(xs2.x, xs2.y+xs_dict[parent_product_mt].y, breakpoints=xs2.breakpoints, interpolation=xs2.interpolation) # modify existing entry
-                else:
-                    xs_dict[new_name] = xs_dict[parent_product_mt] # create entirely new xs entry
-                del xs_dict[parent_product_mt] # remove the old, unstable parent entry.
-            else:
-                if verbose:
-                    print("Non-existent decay product found! {} is an expected product of {}-{}, but is not present in decay_dict.".format(product, parent, long_mt))
-                del xs_dict[parent_product_mt]
 
 def collapse_xs(xs_dict, gs_ary):
     """
@@ -141,9 +130,115 @@ def collapse_xs(xs_dict, gs_ary):
     collapsed_sigma = dict()
     print("Collapsing the cross-sections to the correct group-structure...")
     for parent_product_mt, xs in tqdm(xs_dict.items()):
+        # perform the integration
         I = Integrate(xs)
-        collapsed_sigma[parent_product_mt] = I.definite_integral(*gs_ary.T)/np.diff(gs_ary, axis=1).flatten()
+        sigma = I.definite_integral(*gs_ary.T)/np.diff(gs_ary, axis=1).flatten()
+
+        # # get the strings to construct the key
+        # parent, product, mt_long = parent_product_mt.split("-")
+        # mt = mt_long[3:] # remove the "MT=" at the beginning
+        # # find all matching keys
+        # preexisting_sigma = [key for key in collapsed_sigma if key.startswith(parent+"-"+product)]
+        # for key in preexisting_sigma:
+        #     sigma_old = collapsed_sigma.pop(key)
+        #     parent, product, mt_long = key.split("-") # open the key up and take out the mt number(s) string.
+        #     mt_old = mt_long[3:].strip("()")
+
+        #     mt = mt_old+","+mt # append your new mt here.
+        #     sigma += sigma_old
+        # parent_product_mt = "{}-{}-MT=({})".format(parent, product, mt)
+
+        collapsed_sigma[parent_product_mt] = sigma
     return pd.DataFrame(collapsed_sigma).T
+
+def merge_identical_parent_products(sigma_df):
+    parent_product_all = set("-".join(i.split("-")[:2]) for i in sigma_df.index)
+    print("\nCondensing the sigma_df dataframe to merge together reactions with identical (parent, product) pairs...")
+    for parent_product in tqdm(parent_product_all):
+        merged_sigma = np.zeros(len(sigma_df.columns))
+        mt_list = []
+        for parent_product_mt in sigma_df.index:
+            if parent_product_mt.startswith(parent_product):
+                merged_sigma += sigma_df.drop(parent_product_mt).values
+                mt_list.append(parent_product_mt.split('=')[1])
+        new_key = parent_product+"-MT=({})".format(",".join(mt_list))
+        sigma_df[mt_list] = merged_sigma
+    # return sigma_df # don't actually need to return anything.
+
+class MF10(object):
+    def __getitem__(self, key):
+        return self.reactions.__getitem__(key)
+
+    def __len__(self):
+        return self.reactions.__len__()
+
+    def __iter__(self):
+        return self.reactions.__iter__()
+
+    def __reversed__(self):
+        return self.reactions.__reversed__()
+
+    def __contains__(self, key):
+        return self.reactions.__contains__(key)
+
+    def __init__(self, mf10_mt5_section):
+        if mf10_mt5_section is not None:
+            file_stream = StringIO(mf10_mt5_section)
+            za, target_mass, target_iso, _, ns, _ = openmc.data.get_head_record( file_stream ) # read the first line, i.e. the head record for MF=10, MT=5.
+            self.number_of_reactions = ns
+            self.za = za
+            self.target_mass = target_mass
+            self.target_isomeric_state = target_iso
+            self.reaction_mass_difference, self.reaction_q_value = {}, {}
+            self.reactions = {}
+            for reaction_number in range(ns):
+                (mass_diff, q_value, izap, isomeric_state), tab = openmc.data.get_tab1_record(file_stream)
+                self.reaction_mass_difference[(izap, isomeric_state)] = mass_diff
+                self.reaction_q_value[(izap, isomeric_state)] = q_value
+                self.reactions[(izap, isomeric_state)] = tab
+        else:
+            self.reactions = {}
+
+    def keys(self):
+        return self.reactions.keys()
+
+    def items(self):
+        return self.reactions.items()
+
+    def values(self):
+        return self.reactions.values()
+
+def merge_xs(low_E_xs, high_E_xs, debug_info=""):
+    """
+    Specifically created to append E>=30MeV xs onto the normally obtained data.
+    Adds together two different cross-section profiles.
+    The high_E_xs is expected to start at a minimum energy E_min,
+    while low_E_xs is expected to have its xs zeroed at higher than xs.
+
+    Otherwise... well fuck.
+    I'm going to have to add them together and figure out some sort of interpoation scheme.
+    """
+    E_min = high_E_xs.x.min()
+    low_E_range = low_E_xs.x<E_min
+    strictly_high_E_range = low_E_xs.x>E_min # ignore the point E = E_min
+    # assert all(low_E_xs.y[low_E_range]==0.0), "The high_E_xs record must start at E_min, and the low_E_xs record is expected to have zeroed all y values above at x>=E_min."
+    if all(low_E_xs.y[strictly_high_E_range]==0.0):
+        low_x, low_y, low_interp = low_E_xs.x[low_E_range], low_E_xs.y[low_E_range], ary(detabulate(low_E_xs)["interpolation"], dtype=int)[low_E_range[:-1]]
+        high_x, high_y, high_interp = high_E_xs.x, high_E_xs.y, ary(detabulate(high_E_xs)["interpolation"], dtype=int)
+        return tabulate({
+            "x":np.hstack([low_x, high_x]),
+            "y":np.hstack([low_y, high_y]),
+            "interpolation":np.hstack([low_interp, high_interp]),
+            })
+    else:
+        plot_tab(low_E_xs)
+        plot_tab(high_E_xs)
+        plt.title(debug_info)
+        plt.xscale('log')
+        plt.yscale('log')
+        plt.legend()
+        plt.show()
+        return low_E_xs
 
 if __name__=='__main__':
     assert os.path.exists(os.path.join(sys.argv[-1], 'gs.csv')), "Output directory must already have gs.csv"
@@ -152,21 +247,30 @@ if __name__=='__main__':
         assert os.path.exists(os.path.join(sys.argv[-1], 'integrated_apriori.csv')), "Output directory must already have integrated_apriori.csv in order to sort the response.csv in descending order of expected-radionuclide-population later on."
         apriori = pd.read_csv(os.path.join(sys.argv[-1], 'integrated_apriori.csv'))['value'].values
     endf_file_list = load_endf_directories(sys.argv[1:])
-    print(f"Loaded {len(endf_file_list)} different mateiral files,\n")
+    print(f"Loaded {len(endf_file_list)} different material files,\n")
 
     # First compile the decay records
-    print("\nCompiling the decay_dict...")
-    decay_dict = OrderedDict()
+    print("\nCompiling the decay information as decay_dict, and recording the excited-state to isomeric-state information...")
+    decay_dict = OrderedDict() # dictionary of decay data
+    isomeric_to_excited_state = OrderedDict() # a dictionary that translates all 
     with warnings.catch_warnings(record=True) as w_list:
         for file in tqdm(endf_file_list):
-            if repr(file).strip('<>').startswith('Radio'): # applicable to materials with (mf, mt) = (8, 457) file section
+            name = str(file.target["atomic_number"]).zfill(3) + ATOMIC_SYMBOL[file.target["atomic_number"]] + str(file.target["mass_number"])
+            isomeric_name = name # make a copy
+            if file.target["isomeric_state"]>0: # if it is not at the lowest isomeric state: add the _e behind it too.
+                isomeric_name += "_m"+str(file.target["isomeric_state"])
+                name += "_e"+str(file.target["state"])
+            isomeric_to_excited_state[isomeric_name] = name[3:] # trim the excited state name
+
+            if file.info['sublibrary']=="Radioactive decay data": # applicable to materials with (mf, mt) = (8, 457) file section
                 dec_f = Decay.from_endf(file)
-                decay_dict[str(dec_f.nuclide['atomic_number']).zfill(3)+dec_f.nuclide['name']] = extract_decay(dec_f)
+                decay_dict[name] = extract_decay(dec_f)
     if w_list:
         print(w_list[0].filename+", line {}, {}'s:".format(w_list[0].lineno, w_list[0].category))
         for w in w_list:
             print("    "+str(w.message))
     decay_dict = sort_and_trim_ordered_dict(decay_dict) # reorder it so that it conforms to the 
+    isomeric_to_excited_state = sort_and_trim_ordered_dict(isomeric_to_excited_state)
     
     # Save said decay records
     with open(os.path.join(sys.argv[-1], FULL_DECAY_INFO_FILE:='decay_radiation.json'), 'w') as f:
@@ -179,41 +283,52 @@ if __name__=='__main__':
         condense_spectrum(dec_file)
         
     # Then compile the Incident-neutron records
-    print("\nCompiling the raw cross-section dictionary ...")
+    print("\nCompiling the raw cross-section dictionary.")
     xs_dict = OrderedDict()
     for file in tqdm(endf_file_list):
-        if repr(file).strip('<>').startswith('Incident-neutron'):
+        # mf10 = {}
+        if file.info['sublibrary']=="Incident-neutron data":
             inc_f = IncidentNeutron.from_endf(file)
             nuc_sort_name = str(inc_f.atomic_number).zfill(3)+inc_f.name
 
+            # get the higher-energy range values of xs as well if available.
+            mf10_mt5 = MF10(file.section.get((10, 5), None)) # default value = None if (10, 5 doesn't exist.)
+            for (izap, isomeric_state), xs in mf10_mt5.items():
+                atomic_number, mass_number = divmod(izap, 1000)
+                if atomic_number>0 and mass_number>0: # ignore the weird products that means nothing meaningful
+                    isomeric_name = ATOMIC_SYMBOL[atomic_number]+str(mass_number)
+                    if isomeric_state>0: 
+                        isomeric_name += "_m"+str(isomeric_state)
+                    e_name = isomeric_to_excited_state.get(isomeric_name, isomeric_name.split("_")[0])
+                    long_name = nuc_sort_name+"-"+e_name+"-MT=5"
+                    xs_dict[long_name] = xs
+
+            # get the normal reactions, found in mf=3
             for mt, rx in inc_f.reactions.items():
-                xs_raw = rx.xs['0K']
-                
-                # ignore the entries that isn't telling us the cross-section (which are usually mf=2 files which tells us about resonances, which I don't care)
-                if not hasattr(xs_raw, 'x'):
-                    continue # skip the mt's that doesn't actually give us the cross-sections
                 if any([(mt in AMBIGUOUS_MT), (mt in FISSION_MTS), (301<=mt<=459)]):
                     continue # skip the cases of AMBIGUOUS_MT, fission mt, and heating information. They don't give us useful information about radionuclides produced.
 
                 append_name_list, xs_list = extract_xs(inc_f.atomic_number, inc_f.mass_number, rx, tabulated=True)
+                # add each product into the dictionary one by one.
                 for name, xs in zip(append_name_list, xs_list):
-                    xs_dict[nuc_sort_name+'-'+name] = xs
-    clean_up_missing_records(xs_dict, decay_dict)
-    xs_dict = sort_and_trim_ordered_dict(xs_dict)
+                    xs_dict[nuc_sort_name + '-' + name] = xs
 
+    xs_dict = sort_and_trim_ordered_dict(xs_dict)
 
     print("\nCollapsing the cross-section to the group structure specified by 'gs.csv' and saving it as 'response.csv' ...")
     sigma_df = collapse_xs(xs_dict, gs)
+    merge_identical_parent_products(sigma_df)
+
     if SORT_BY_REACTION_RATE:
-      sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]
+        sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]
     sigma_df.to_csv(os.path.join(sys.argv[-1], 'response.csv'))
     # saves the number of radionuclide produced per (neutron cm^-2) of fluence flash-irradiated in that given bin.
-
     
     with open(os.path.join(sys.argv[-1], CONDENSED_DECAY_INFO_FILE:='decay_counts.json'), 'w') as f:
         print("\nSaving the condensed decay information as {} ...".format(CONDENSED_DECAY_INFO_FILE))
         json.dump(decay_dict, f, cls=EncoderOpenMC)
 
-    """
-    See _check_stuff.py for the to-do list. 2020-12-06 15:50:18
-    """
+    # save parameters at the end.
+    parameters_dict = dict(HPGe_eff_file=HPGe_eff_file, gamma_E=gamma_E, FISSION_MTS=FISSION_MTS, AMBIGUOUS_MT=AMBIGUOUS_MT, SORT_BY_REACTION_RATE=SORT_BY_REACTION_RATE)
+    parameters_dict.update({sys.argv[0]+" argv": sys.argv[1:]})
+    save_parameters_as_json(sys.argv[-1], parameters_dict)

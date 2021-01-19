@@ -1,0 +1,231 @@
+from numpy import cos, arccos, sin, arctan, tan, pi, sqrt; from numpy import array as ary; import numpy as np
+from numpy import log as ln
+import numpy.linalg as la
+from matplotlib import pyplot as plt
+import seaborn as sns
+import pandas as pd
+import os, sys, itertools
+from tqdm import tqdm
+from scipy.constants import N_A # Avogadro's number
+from misc_library import get_apriori, unserialize_dict, save_parameters_as_json
+from GetReactionRates import IRRADIATION_DURATION, MEASUREMENT_DURATION, FOIL_AREA, BARN, MM_CM
+
+SATURATION_COUNT_RATE = 1000 # maximum number of gamma countable accurately per second
+MAX_THICKNESS = 0.5 # mm
+"""
+if RANK_BY_DETERMINANT: calculate a non-singular matrix representing the curvature,
+And then performance of each set of foil combination is then quantified by the determinant of its curvature matrix.
+else: use various approach.
+"""
+RANK_BY_DETERMINANT = False 
+
+def D_KL(test_spectrum, apriori_spectrum):
+    """ Calculates the Kullback-Leibler divergence.
+    """
+    fDEF = apriori_spectrum/sum(apriori_spectrum)
+    f = test_spectrum/sum(test_spectrum)
+    from autograd import numpy as agnp
+    ratio = agnp.nan_to_num(fDEF/f)
+    return agnp.dot(fDEF, ratio)
+    
+def curvature_matrix(R, S_N_inv):
+    """
+    parameters
+    ----------
+    R : response matrix, with the appropriate thickness information alreay included.
+    S_N_inv : inverse of the covariance matrix of the reaction rates vector N
+    """
+    return R.T @ S_N_inv @ R
+
+def confusion_matrix(R):
+    """
+    input: Response matrix (m*n), no need to normalize. THe thickness does not matter.
+    output: confusion matrix, dimension = (n*n) where n = number of bins. 
+    """
+    return la.pinv(R) @ R
+
+class Foil():
+    """
+    A collection of all of the reactions in a foil.
+    """
+    def __init__(self, material_name, density, microscopic_cross_sections, counts_per_primary_product):
+        """
+        Determines the optimal thickness for said foil as well.
+        """
+        pass
+        self.material_name = material_name
+        self.partial_density = density
+        self.response_counts_per_mm = (microscopic_cross_sections.values.T / MM_CM * BARN * self.partial_density.values).T # reactions per cm^-2 fluence per mm thickness
+        self.counts_per_primary_product = counts_per_primary_product
+        self.gamma_response_counts_per_mm = (self.response_counts_per_mm.T * self.counts_per_primary_product.values).T * FOIL_AREA # gamma counts fluence per mm thickness
+        total_counts_per_mm_thickness = self.gamma_response_counts_per_mm @ apriori_flux
+        self.thickness = np.clip(
+            SATURATION_COUNT_RATE*MEASUREMENT_DURATION/total_counts_per_mm_thickness.sum(), 0, MAX_THICKNESS
+            )
+        self.counts_response_with_errors = self.gamma_response_counts_per_mm * self.thickness # gamma counts per foil
+        self.counts_response = remove_uncertainty_from_np_array(self.counts_response_with_errors)
+
+    def __repr__(self):
+        return super().__repr__().replace("Foil object", self.material_name+" foil")
+
+    def __add__(self, foil_like):
+        assert isinstance(foil_like, Foil), "Can only add Foil/FoilSet onto another Foil/FoilSet to create another FoilSet."
+        return FoilSet(self, foil_like)
+
+class FoilSet(Foil):
+    """a collection of Foils"""
+    def __init__(self, *foils):
+        self.counts_response, self.material_name = [], []
+        for foil in foils:
+            self.counts_response.append(foil.counts_response)
+            if type(foil)==Foil:
+                self.material_name.append(foil.material_name)
+            else:
+                for mat in foil.material_name:
+                    self.material_name.append(mat)
+        self.counts_response = np.concatenate(self.counts_response)
+
+    def __repr__(self):
+        return super(Foil, self).__repr__().replace("FoilSet object", "FoilSet of {} foils".format(len(self.material_name)))
+
+def remove_uncertainty_from_np_array(array):
+    shape = array.shape
+    flattened_mean_values = [i.n for i in array.flatten().tolist()]
+    return ary(flattened_mean_values).reshape(shape)
+
+def get_foilset_condensed_name(foil_list, space_symbol_in_bracket=True):
+    if space_symbol_in_bracket:
+        return "-".join(i.split()[1].strip("()") for i in foil_list)
+    else:
+        return "-".join(i[:2] for i in foil_list)
+
+def _sum(*long_list):
+    if len(long_list)>1:
+        return long_list[0] + _sum(*long_list[1:])
+    else:
+        return long_list[0]
+
+if __name__=='__main__':
+    assert os.path.exists(os.path.join(sys.argv[-1], 'gs.csv')), "Output directory must already have gs.csv"
+    gs = pd.read_csv(os.path.join(sys.argv[-1], 'gs.csv')).values
+
+    apriori_flux, apriori_fluence = get_apriori(sys.argv[-1], IRRADIATION_DURATION)
+    mod_apriori_fluence = np.clip(apriori_fluence, min([i for i in apriori_fluence if i>0])*0.5, None)
+
+    assert os.path.exists(os.path.join(sys.argv[-1], "counts.csv")), "A 'counts.csv' file must exist (generated by GetReactionRates.py) at the target directory listed by the last argv argument."
+    assert os.path.exists(os.path.join(sys.argv[-1], "response.csv")), "A 'response.csv' file must exist (generated by ReadData.py) at the target directory listed by the last argv argument."
+    population = pd.read_csv(os.path.join(sys.argv[-1], "counts.csv"), index_col=[0])
+    raw_response_matrix = pd.read_csv(os.path.join(sys.argv[-1], "response.csv"), index_col=[0])
+    raw_response_matrix = raw_response_matrix.loc[population.index]
+
+    foil_candidates = []
+    material_series = population["default material"]
+    pbar = tqdm(sorted(set(material_series), key=material_series.tolist().index))
+    for material in pbar:
+        pbar.set_description(material)
+        if material=="Missing (N/A)":
+            continue # skip all missing materials
+        matching_material = material_series == material
+        foil_candidates.append(Foil(material, 
+                    population["partial number density (cm^-3)"][matching_material],
+                    raw_response_matrix[matching_material],
+                    pd.Series(unserialize_dict(population["total gamma counts per primary product"][matching_material].to_dict())),
+                    )
+            )
+    
+    foil_candidates_dict = {f.material_name: f for f in foil_candidates}
+    complete_foil_set = FoilSet(*foil_candidates)
+
+    if RANK_BY_DETERMINANT:
+        import autograd
+        D_KL_hessian_getter = autograd.hessian(lambda x: D_KL(x, mod_apriori_fluence.copy()))
+        print("Calculating the hessian matrix ...")
+        hess_matrix = D_KL_hessian_getter(mod_apriori_fluence)
+
+        R = complete_foil_set.counts_response
+        chi2_contribution = curvature_matrix(R, la.inv(np.diag(R @ apriori_fluence)))
+
+    else:
+        # calculate the specificity and senitivity for each foilset, and then rank them.
+        num_foils = int(input("How many foils do you want to pick out?"))
+        specificity, sensitivity = {}, {}
+        for f_set in itertools.combinations(foil_candidates, num_foils):
+            f_set = _sum(*f_set)
+            f_set_name = get_foilset_condensed_name(f_set.material_name)
+            R = f_set.counts_response
+            specificity[f_set_name] = np.diag(confusion_matrix(R)).sum()/R.shape[1]
+            S_N_inv = la.inv(np.diag(R @ apriori_fluence))
+            full_curvature = curvature_matrix(R, S_N_inv)
+            sensitivity[f_set_name] = np.diag(full_curvature).sum()
+        metrics = pd.DataFrame([sensitivity, specificity])
+        plt.scatter(*metrics.values.T)
+        plt.show()
+
+        f_set = complete_foil_set
+        material_and_thickness = ["{} : {}".format(name.split()[1].strip('()').rjust(2), thickness)
+                        for name, thickness in zip(complete_foil_set.material_name, [f.thickness for f in foil_candidates]) ]
+        print("Foils used :\n", material_and_thickness)
+
+        try:
+            while True:
+                R = f_set.counts_response
+                S_N_inv = la.inv(np.diag(R @ apriori_fluence))
+
+                # confusion matrix
+                sns.heatmap(confusion_matrix(R))
+                plt.title(f"Confusion matrix of the foilset with {len(f_set.material_name)} foils")
+                plt.show()
+
+                # curvature, presentation 1 (bar plot)
+                full_curvature = curvature_matrix(R, S_N_inv)
+                curvature_diag = np.diag(full_curvature)
+                plt.bar(range(len(curvature_diag)), curvature_diag)
+                plt.suptitle("Curvature of chi2 landscape in the principal directions,")
+                plt.title("plotted by bin number")
+                plt.yscale('log')
+                plt.xlabel("bin number")
+                plt.show()
+
+                # curvature, presentation 2 (loglog line plot)
+                plt.loglog(gs.flatten(), np.repeat(curvature_diag, 2))
+                plt.title("Curvature of chi2 landscape in the principal directions")
+                plt.xlabel("E (eV)")
+                plt.ylabel("Curvature ((std score)^2/unit fluence(cm^-2))")
+                plt.show()
+
+                # curvature, presentation 3 (heatmap)
+                sns.heatmap(full_curvature)
+                plt.title("Curvature of chi2 landscape")
+                plt.show()
+
+                # curvature, presentation 2.5 (incremental)
+                for foil_name in f_set.material_name:
+                    r_line = foil_candidates_dict[foil_name].counts_response
+                    S_N_inv = la.inv(np.diag(r_line @ apriori_fluence))
+                    curvature_diag = np.diag(curvature_matrix(r_line, S_N_inv))
+                    plt.loglog( gs.flatten(), np.repeat(curvature_diag, 2), label=foil_name)
+                plt.loglog(gs.flatten(), np.repeat(curvature_diag, 2), label="Total")
+                plt.suptitle("Curvature of the chi2 landscape in the principal directions")
+                plt.title("including partial contributions from each")
+                plt.legend()
+                plt.show()
+
+                # Robin's suggestion
+                plt.loglog( (R.T * apriori_fluence).T )
+                plt.title("Partial reactionr ates")
+                plt.show()
+
+                print("Attempting to pick a second selection ...")
+                print("Ignore which of the following foils?")
+                print([f.material_name for f in foil_candidates])
+                ignored_foils = input()
+                f_set = FoilSet(*[f for f in foil_candidates if f.material_name not in ignored_foils])
+
+                print("Foils used :\n", "\n".join(f_set.material_name))
+        except KeyboardInterrupt:
+            pass
+        finally:
+        # save parameters at the end.
+            save_parameters_as_json(sys.argv[-1], dict(MAX_THICKNESS=MAX_THICKNESS, RANK_BY_DETERMINANT=RANK_BY_DETERMINANT))
+
+        # can show where each curvature contribution is coming from

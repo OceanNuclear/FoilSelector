@@ -16,13 +16,13 @@ MeV = 1E6
 # debugging tools
 sdir = lambda x: [i for i in dir(x) if '__' not in i]
 import matplotlib.pyplot as plt
-plot_tab = lambda tab: plt.plot(*[getattr(tab, ax) for ax in 'xy'])
+plot_tab = lambda tab, *args, **kwargs: plt.plot(*[getattr(tab, ax) for ax in 'xy'], *args, **kwargs)
 haskey = lambda dict_instance, key: key in dict_instance.keys()
 
 ######################### frequently referenced table for interpreting openmc data #####################
 from openmc.data.reaction import REACTION_NAME
 from openmc.data.endf import SUM_RULES
-from openmc.data import NATURAL_ABUNDANCE, atomic_mass, ATOMIC_NUMBER
+from openmc.data import NATURAL_ABUNDANCE, atomic_mass, ATOMIC_NUMBER, ATOMIC_SYMBOL
 from openmc.data import INTERPOLATION_SCHEME
 
 MT_to_nuc_num = {
@@ -145,7 +145,8 @@ openmc_variable = {"REACTION_NAME":REACTION_NAME, "SUM_RULES":SUM_RULES,
                     "NATURAL_ABUNDANCE":NATURAL_ABUNDANCE,
                     "atomic_mass":atomic_mass, "ATOMIC_NUMBER":ATOMIC_NUMBER,
                     "INTERPOLATION_SCHEME":INTERPOLATION_SCHEME,
-                    "FISSION_MTS":FISSION_MTS, "AMBIGUOUS_MT":AMBIGUOUS_MT}
+                    "FISSION_MTS":FISSION_MTS, "AMBIGUOUS_MT":AMBIGUOUS_MT, 
+                    "MT_to_nuc_num": MT_to_nuc_num}
 
 ################################# The Integrate class #################################################
 class SilenceNumpyDivisionError(contextlib.ContextDecorator):
@@ -312,13 +313,47 @@ class Integrate():
 
     @staticmethod
     def area_scheme_5(x1, x2, y1, y2):
+        """
+        if m==-1:
+            should give y1/x1**m *(dlnx)
+
+            if x1==0: should give dx*y2 = x2*y2.
+            if y1==0: should give 0 = y1.
+            if dx ==0: should give 0 = dx.
+        then:
+            # dlnx -> inf is covered by x1==0
+            dlny -> inf is covered by y1==0
+            m -> inf is covered by dlny -> inf (y1==0)
+        
+        inv_x1_m = 1/x1**m
+        diff_over_expo = (x2**(m+1) - x1**2(m+1)) / (m+1)
+        """
         dx, dy = x2-x1, y2-y1
         dlnx, dlny = ln(x2) - ln(x1), ln(y2) - ln(y1)
+
         m = dlny/dlnx
-        nan_replacement = x2**(m+1)*ln(x2) - x1**(m+1)*ln(x1)
-        diff_x_over_m_1 = np.nan_to_num((x2**(m+1) - x1**(m+1))/(m+1), nan=nan_replacement, posinf=nan_replacement, neginf=nan_replacement)
-        diff_x_over_m_1_over_x1_to_m = np.nan_to_num(diff_x_over_m_1/(x1**m), nan=0, posinf=0, neginf=0)
-        return y2*diff_x_over_m_1_over_x1_to_m
+        # m is problematic if
+        # any(x1==0, y1==0, dx==0)
+        # which respectively gives:
+        # T, F, F:  x2*y2 =       = dx*(y1+dy)
+        # F, T, F: 0 = y1 = dx*y1
+        # F, F, T: 0 = dx = dx*y1 = dx*(y1+dy)
+        # T, T, F: 0 = y1 = dx*y1
+        # T, F, T: 0 = dx = dx*y1 = dx*(y1+dy)
+        # F, T, T: 0 =      dx*y1 = y2 * (y1/y2)
+        # T, T, T: 0 = y2 = dx*y1 = dx*(y1+dy)
+        # if we loosen the constraints a bit by "blaming it on the user",
+        # and say that if x1==0 then (y1 must== y2), ("otherwise it's your fault it integrated wrongly"),
+        # then expression (dx*y1) becomes valid for all of the above edge cases listed.
+
+        # problematic if any(x1==0, y1==0, dx==0)
+        inv_x1_m = 1/(x1**m)
+
+        # problematic if m==-1; so take the limit in those cases:
+        diff_over_expo  = np.nan_to_num((x2**(m+1) - x1**(m+1)) / (m+1), nan=dlnx, posinf=dlnx)
+
+        # filter out the cases of any(x1==0, y1==0, dx==0) -> dx*y1
+        return y1 * np.nan_to_num(inv_x1_m * diff_over_expo, nan=dx, posinf=dx, neginf=dx)
 
 ####################### functions used for reading and saving data######################################
 def load_endf_directories(folder_list):
@@ -332,7 +367,7 @@ def load_endf_directories(folder_list):
     except (IndexError, AssertionError):
         print("usage:")
         print("'python "+sys.argv[0]+" folders/ containing/ endf/ files/ in/ descending/ order/ of/ priority/ [output/]'")
-        print("where the outputs-saving directory 'output/' is only requried when read_apriori_and_gs_df is used.")
+        # print("where the outputs-saving directory 'output/' is only requried when read_apriori_and_gs_df is used.")
         print("Use wildcard (*) to replace directory as .../*/ if necessary")
         print("The endf files in question can be downloaded from online sources")
         # by running the make file.")
@@ -465,6 +500,32 @@ def unserialize_dict(mixed_object):
         pass
     return mixed_object
 
+def get_apriori(file_location, irradiation_duration):
+    assert os.path.exists(os.path.join(file_location, 'integrated_apriori.csv')), "Output directory must already have integrated_apriori.csv for calculating the radionuclide populations."
+    print("Reading integrated_apriori.csv as the fluence, i.e. total number of neutrons/cm^2/eV/s, averaged over the IRRADIATION_DURATION = {} s\n".format(irradiation_duration))
+    apriori_flux = pd.read_csv(os.path.join(file_location, 'integrated_apriori.csv'))['value'].values # integrated_apriori.csv is a csv with header = value and number of rows = len(gs); no index.
+    apriori_fluence = apriori_flux * irradiation_duration
+    return apriori_flux, apriori_fluence
+
+def save_parameters_as_json(directory, parameter_dict):
+    """
+    Saves the parameter used in this run.
+    search for parameters_used.json in the directory, open it and save the parameter_dict.
+    """
+    json_filename = os.path.join(directory,"parameters_used.json")
+    # read the json file if it exist
+    if os.path.exists(json_filename):
+        with open(json_filename) as f:
+            json_data = json.load(f)
+    else:
+        json_data = {}
+    # update the content
+    json_data.update(parameter_dict)
+
+    with open(json_filename, "w") as f:
+        json.dump(json_data, f)
+    return
+
 ############################### HPGe Efficiency reader #################################################
 def exp(numbers):
     if isinstance(numbers, uncertainties.core.AffineScalarFunc):
@@ -545,6 +606,7 @@ def HPGe_efficiency_curve_generator(file_location, deg=4, cov=True):
 
 ############################## Bateman equation used only for error checking ###########################
 import math
+import scipy.linalg as spln
 def kahan_sum(a, axis=0):
     """
     Carefully add together sum to avoid floating point precision problem.
@@ -606,45 +668,27 @@ def Bateman_convolved_generator(branching_ratios, decay_constants, a, decay_cons
         return premultiplying_factor*(multiplying_factors@vector)
     return calculate_convoled_population
 
-def Bateman_integrated_population(branching_ratios, decay_constants, a, b, c, DEBUG=False, decay_constant_threshold=1E-23):
-    """
-    Calculates the amount of decay radiation measured using the Bateman equation.
-    branching_ratio : array
-        the list of branching ratios of all its parents, and then itself, in the order that the decay chain was created.
-    a : scalar
-        End of irradiation period.
-        Irrdiation power = 1/a, so that total amount of irradiation = 1.
-    b : scalar
-        Start of gamma measurement time.
-    c : scalar
-        End of gamma measurement time.
-    The initial population is always assumed as 1.
-    Reduce decay_constant_threshold when calculating on very short timescales.
-    """
-    # assert len(branching_ratios)==len(decay_constants), "Both are lists of parameters describing the entire pathway of the decay chain up to that isotope."
-    if any([i<=decay_constant_threshold for i in decay_constants]):
-        if DEBUG: print(f"{decay_constants=} \ntoo small, escaped.")
-        return Variable(0.0, 0.0) # catch the cases where there are zeros in the decay_rates
-            # in practice this should only happen for chains with stable parents, i.e.
-            # this if-condition would only be used if the decay chain is of length==1.    
-    premultiplying_factor = np.product(decay_constants[:-1])*np.product(branching_ratios[1:])/a
-    inverted_matrix = np.diff(np.meshgrid(decay_constants, decay_constants)[::-1], axis=0)[0]
-    inverted_matrix += np.diag(decay_constants)**2
-    final_matrix = 1/inverted_matrix
-    multiplying_factors = np.product(final_matrix, axis=-1)
-    vector_uncollapsed = ary([  +uncertainties.unumpy.exp(-ary(decay_constants)*c),
-                    -uncertainties.unumpy.exp(-ary(decay_constants)*(c-a)),
-                    -uncertainties.unumpy.exp(-ary(decay_constants)*b),
-                    +uncertainties.unumpy.exp(-ary(decay_constants)*(b-a),)], dtype=object)
-    vector = np.sum(vector_uncollapsed, axis=0)
-    if DEBUG:
-        print(#inverted_matrix, '\n', final_matrix, '\n',
-        'multiplying_factors=\n', multiplying_factors,
-        #'\n--------\nvector=\n', vector,
-        )
-        print("Vector left = \n", uncertainties.unumpy.exp(-ary(decay_constants)*(b-a)) - uncertainties.unumpy.exp(-ary(decay_constants)*b))
-        print("Vector right= \n", uncertainties.unumpy.exp(-ary(decay_constants)*(c-a)) - uncertainties.unumpy.exp(-ary(decay_constants)*c))
-    return premultiplying_factor * (multiplying_factors @ vector)
+def create_lambda_matrix(l_vec, decay_constant_threshold=1E-23):
+    lambda_vec = []
+    for lamb_i in l_vec:
+        if isinstance(lamb_i, uncertainties.core.AffineScalarFunc):
+            lambda_vec.append(lamb_i.n)
+        else:
+            lambda_vec.append(float(lamb_i))
+    return - np.diag(lambda_vec, 0) + np.diag(lambda_vec[:-1], -1)
+
+# expm = lambda M: spln.expm(M.T).T
+expm = lambda M: spln.expm(M)
+def Bateman_mat_exp_num_decays(lambda_vec, a, b, c, decay_constant_threshold=1E-23):
+    if any(ary(lambda_vec)<=decay_constant_threshold):
+        return 0
+    matrix = create_lambda_matrix(lambda_vec)
+    iden = np.identity(len(lambda_vec))
+    multiplier = 1/a * (expm(matrix*(b-a))) @ (expm(matrix*(c-b)) - iden) @ (expm(matrix*(a)) - iden)
+    inv = np.linalg.inv(matrix)
+    initial_population_vector = ary( [1,]+[0 for _ in lambda_vec[1:]] ) # initial population of all nuclides = 0 except for the very first isotope, which has 1.0.
+    final_fractions = multiplier @ inv @ inv @ initial_population_vector
+    return final_fractions[-1] * lambda_vec[-1]
 
 def expand_bracket(solid):
     """
