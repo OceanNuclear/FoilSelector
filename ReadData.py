@@ -1,6 +1,6 @@
 # typical system/python stuff
 import os, sys, json
-import warnings
+import warnings, gc
 from io import StringIO
 from collections import OrderedDict
 from tqdm import tqdm
@@ -22,6 +22,7 @@ from misc_library import (haskey,
                          # plot_tab,
                          tabulate,
                          detabulate,
+                         ordered_set,
                          EncoderOpenMC,
                          MT_to_nuc_num, 
                          load_endf_directories,
@@ -58,12 +59,12 @@ def condense_spectrum(dec_file):
         The workaround is just to use another library where the evaluators aren't so lazy to not use the continuous_flag=='both' :/
     """
     count = Variable(0.0,0.0)
-    if haskey(dec_file['spectra'], 'gamma') and haskey(dec_file['spectra']['gamma'], 'discrete'):
+    if ("gamma" in dec_file['spectra']) and ("discrete" in dec_file['spectra']['gamma']):
         norm_factor = dec_file['spectra']['gamma']['discrete_normalization']
         for gamma_line in dec_file['spectra']['gamma']['discrete']:
             if np.clip(gamma_line['energy'].n, *gamma_E)==gamma_line['energy'].n:
                 count += photopeak_eff_curve(gamma_line['energy']) * gamma_line['intensity']/100 * norm_factor
-    if haskey(dec_file['spectra'], 'xray') and haskey(dec_file['spectra']['xray'], 'discrete'):
+    if ('xray' in dec_file['spectra']) and ('discrete' in dec_file['spectra']['xray']):
         norm_factor = dec_file['spectra']['xray']['discrete_normalization']
         for xray_line in dec_file['spectra']['xray']['discrete']:
             if np.clip(xray_line['energy'].n, *gamma_E)==xray_line['energy'].n:
@@ -128,13 +129,14 @@ def collapse_xs(xs_dict, gs_ary):
     by averaging the cross-section within each bin.
     """
     collapsed_sigma = dict()
-    print("Collapsing the cross-sections to the desired group-structure...")
+    print("Collapsing the cross-sections to the desired group-structure:")
     for parent_product_mt, xs in tqdm(xs_dict.items()):
         # perform the integration
         I = Integrate(xs)
         sigma = I.definite_integral(*gs_ary.T)/np.diff(gs_ary, axis=1).flatten()
 
         collapsed_sigma[parent_product_mt] = sigma
+    del xs_dict; gc.collect()
     return pd.DataFrame(collapsed_sigma).T
 
 def merge_identical_parent_products(sigma_df):
@@ -149,27 +151,13 @@ def merge_identical_parent_products(sigma_df):
     parent_product_all = ordered_set(parent_product_list)
 
     sigma_unique = {}
-    print("\nCondensing the sigma_df dataframe to merge together reactions with identical (parent, product) pairs...")
+    print("\nCondensing the sigma_df dataframe to merge together reactions with identical (parent, product) pairs:")
     for parent_product in tqdm(parent_product_all):
         matching_reactions = parent_product_list==parent_product
         mt_name = "-MT=({})".format(",".join(mt_list[matching_reactions]))
         sigma_unique[parent_product+mt_name] = partial_reaction_array[matching_reactions].sum(axis=0)
+    del sigma_df; del partial_reaction_array; gc.collect()
     return pd.DataFrame(sigma_unique).T
-
-def ordered_set(sequence):
-    """
-    Get the sorted set, sorted according to the order of element first appearing in the sequence.
-    source:
-    http://www.martinbroadhurst.com/removing-duplicates-from-a-list-while-preserving-order-in-python.html
-    date accessed website: 2021-01-19 11:44:23
-    """
-    seen = set()
-    return [x for x in sequence if not (x in seen or seen.add(x))]
-    # GENIUS!
-    # (x in seen) -> stop evaluating;
-    # (x not in seen) -> add x to seen -> bracket returns False
-    #   -> negated by "not" in front of bracket -> adds element to list
-    # This should be an O(n) operation.
 
 class MF10(object):
     def __getitem__(self, key):
@@ -187,6 +175,8 @@ class MF10(object):
     def __contains__(self, key):
         return self.reactions.__contains__(key)
 
+    __slots__ = ["number_of_reactions", "za", "target_mass", "target_isomeric_state", "reaction_mass_difference", "reaction_q_value", "reactions"]
+    # __slots__ created for memory management purpose in case there are many suriving instances of MF10 all present at once.
     def __init__(self, mf10_mt5_section):
         if mf10_mt5_section is not None:
             file_stream = StringIO(mf10_mt5_section)
@@ -246,6 +236,8 @@ def merge_xs(low_E_xs, high_E_xs, debug_info=""):
         plt.show()
         return low_E_xs
 
+# must load decay informatino and neutron incidence information in a single python script,
+# because the former is needed to compile the dictionary of isomeric_to_excited_state, which the latter use when saving the reaction rates products..
 if __name__=='__main__':
     assert os.path.exists(os.path.join(sys.argv[-1], 'gs.csv')), "Output directory must already have gs.csv"
     gs = pd.read_csv(os.path.join(sys.argv[-1], 'gs.csv')).values
@@ -256,7 +248,7 @@ if __name__=='__main__':
     print(f"Loaded {len(endf_file_list)} different material files,\n")
 
     # First compile the decay records
-    print("\nCompiling the decay information as decay_dict, and recording the excited-state to isomeric-state information...")
+    print("\nCompiling the decay information as decay_dict, and recording the excited-state to isomeric-state information:")
     decay_dict = OrderedDict() # dictionary of decay data
     isomeric_to_excited_state = OrderedDict() # a dictionary that translates all 
     with warnings.catch_warnings(record=True) as w_list:
@@ -309,7 +301,7 @@ if __name__=='__main__':
                     isomeric_name = ATOMIC_SYMBOL[atomic_number]+str(mass_number)
                     if isomeric_state>0: 
                         isomeric_name += "_m"+str(isomeric_state)
-                    e_name = isomeric_to_excited_state.get(isomeric_name, isomeric_name.split("_")[0])
+                    e_name = isomeric_to_excited_state.get(isomeric_name, isomeric_name.split("_")[0]) # return the ground state name if there is no corresponding excited state name for such isomer.
                     long_name = nuc_sort_name+"-"+e_name+"-MT=5"
                     xs_dict[long_name] = xs
 
@@ -323,15 +315,22 @@ if __name__=='__main__':
                 for name, xs in zip(append_name_list, xs_list):
                     xs_dict[nuc_sort_name + '-' + name] = xs
 
+    # memory management
+    print("Deleting decay_dict and endf_file_list since it will no longer be used in this script, in an attempt to reduce memory usage")
+    del decay_dict; del endf_file_list; gc.collect()
+
     xs_dict = sort_and_trim_ordered_dict(xs_dict)
 
-    print("\nCollapsing the cross-section to the group structure specified by 'gs.csv' and saving it as 'response.csv' ...")
+    print("\nCollapsing the cross-section to the group structure specified by 'gs.csv' and then saving it as 'response.csv' ...")
     sigma_df = collapse_xs(xs_dict, gs)
+    del xs_dict; gc.collect()
+
     if not (SHOW_SEPARATE_MT_REACTION_RATES:=False):
         sigma_df = merge_identical_parent_products(sigma_df)
 
     if SORT_BY_REACTION_RATE:
         sigma_df = sigma_df.loc[ary(sigma_df.index)[np.argsort(sigma_df.values@apriori)[::-1]]]
+    print("Saving the cross-sections to file as 'response.csv'...")
     sigma_df.to_csv(os.path.join(sys.argv[-1], 'response.csv'))
     # saves the number of radionuclide produced per (neutron cm^-2) of fluence flash-irradiated in that given bin.
 
@@ -339,3 +338,4 @@ if __name__=='__main__':
     parameters_dict = dict(HPGe_eff_file=HPGe_eff_file, gamma_E=gamma_E, FISSION_MTS=FISSION_MTS, AMBIGUOUS_MT=AMBIGUOUS_MT, SORT_BY_REACTION_RATE=SORT_BY_REACTION_RATE, SHOW_SEPARATE_MT_REACTION_RATES=SHOW_SEPARATE_MT_REACTION_RATES)
     parameters_dict.update({sys.argv[0]+" argv": sys.argv[1:]})
     save_parameters_as_json(sys.argv[-1], parameters_dict)
+    print("SUCCESS!")

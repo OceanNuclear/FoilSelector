@@ -10,10 +10,10 @@ import uncertainties
 from uncertainties.core import Variable
 import pandas as pd
 from collections import namedtuple, OrderedDict
-from misc_library import haskey, unserialize_dict
 from misc_library import (  get_apriori,
                             get_fraction,
                             pick_material,
+                            unserialize_dict,
                             get_elemental_fractions,
                             save_parameters_as_json,                            
                             extract_elem_from_string,
@@ -31,7 +31,7 @@ def build_decay_chain(decay_parent, decay_dict, decay_constant_threshold=1E-23):
     decay_dict : dictionary
         the entire decay_dict containing all of the that there is.
     """
-    if not haskey(decay_dict, decay_parent):
+    if not decay_parent in decay_dict:
         # decay_dict does not contain any decay data record about the specified isotope (decay_parent), meaning it is (possibly) stable.
         return_dict = {'name':decay_parent, 'decay_constant':Variable(0.0,0.0), 'countable_photons':Variable(0.0,0.0), 'modes':{}}
     else: # decay_dict contains the specified decay_parent
@@ -70,7 +70,7 @@ def linearize_decay_chain(decay_file):
                             [decay_file['decay_constant']],
                             decay_file['countable_photons'])
     all_chains = [self_decay]
-    if haskey(decay_file, 'modes'): # expand the decay modes if there are any.
+    if 'modes' in decay_file: # expand the decay modes if there are any.
         for mode in decay_file['modes']:
             this_branch = linearize_decay_chain(mode['daughter']) # note that this is a list, so we need to unpack it.
             for subbranch in this_branch:
@@ -223,7 +223,10 @@ if __name__=='__main__':
     population["gamma counts per unit thickness of foil (mm^-1)"] = population["gamma counts per volume of foil (cm^-3)"] * FOIL_AREA * MM_CM# assuming the area = Foil Area
     tprint("Re-ordering the dataframe according to the counts per volume...")
     population.sort_values("gamma counts per volume of foil (cm^-3)", inplace=True, ascending=False) # sort again, this time according to the required volume
-    tprint(f"Saving as 'counts.csv'...")
+    tprint("Removing all reactions whose products is the same as the product (i.e. elastic scattering):")
+    population = population[ary([parent_product_mt.split("-")[0] != parent_product_mt.split("-")[1] for parent_product_mt in population.index])]
+
+    tprint("Saving as 'counts.csv'...")
     population.to_csv(os.path.join(sys.argv[-1], 'counts.csv'), index_label='rname')
 
     # save parameters at the end.
